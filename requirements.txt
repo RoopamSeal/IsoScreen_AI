@@ -4,3 +4,5 @@ numpy
 plotly
 rdkit
 Pillow
+matplotlib
+
