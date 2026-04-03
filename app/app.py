@@ -1,5 +1,11 @@
 import streamlit as st
 import pandas as pd
+import sys
+import os
+
+# Add the parent folder to the Python path so utils can be imported
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 from utils.smiles_standardizer import standardize_smiles
 from rdkit import Chem
 from rdkit.Chem import Draw
@@ -52,4 +58,3 @@ if uploaded_file:
     for mol in standardized_mols:
         if mol:
             st.image(Draw.MolToImage(mol, size=(300, 300)))
-
