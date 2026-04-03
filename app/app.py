@@ -3,7 +3,7 @@ import pandas as pd
 import sys
 import os
 
-# Add the parent folder to the Python path so utils can be imported
+# Add the parent folder to the Python path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from utils.smiles_standardizer import standardize_smiles
@@ -13,29 +13,32 @@ from rdkit.Chem import Draw
 st.set_page_config(page_title="Hybrid ADMET Prediction Platform", layout="wide")
 
 st.title("Hybrid ADMET Prediction Platform")
-st.write(
-    """
-Upload a CSV file containing SMILES strings.
-The app will standardize the molecules and display a summary.
-"""
-)
+st.write("Standardize and visualize molecules via direct input or CSV upload.")
 
-# File uploader
-uploaded_file = st.file_uploader("Upload CSV with a 'smiles' column", type=["csv"])
+# --- INPUT SECTION ---
+input_method = st.radio("Choose Input Method:", ("Text Input", "CSV Upload"))
+smiles_list = []
 
-if uploaded_file:
-    try:
-        df = pd.read_csv(uploaded_file)
-    except Exception as e:
-        st.error(f"Failed to read CSV: {e}")
-        st.stop()
+if input_method == "Text Input":
+    text_input = st.text_area("Enter SMILES strings (one per line):", placeholder="CC(=O)OC1=CC=CC=C1C(=O)O")
+    if text_input:
+        # Split by newlines and remove empty spaces/lines
+        smiles_list = [s.strip() for s in text_input.split('\n') if s.strip()]
 
-    if "smiles" not in df.columns:
-        st.error("CSV must contain a 'smiles' column")
-        st.stop()
+else:
+    uploaded_file = st.file_uploader("Upload CSV with a 'smiles' column", type=["csv"])
+    if uploaded_file:
+        try:
+            df = pd.read_csv(uploaded_file)
+            if "smiles" in df.columns:
+                smiles_list = df["smiles"].dropna().tolist()
+            else:
+                st.error("CSV must contain a 'smiles' column")
+        except Exception as e:
+            st.error(f"Failed to read CSV: {e}")
 
-    # Standardize SMILES
-    smiles_list = df["smiles"].tolist()
+# --- PROCESSING SECTION ---
+if smiles_list:
     standardized_mols = []
     invalid_smiles = []
 
@@ -45,16 +48,23 @@ if uploaded_file:
             invalid_smiles.append(smi)
         standardized_mols.append(mol)
 
+    # --- SUMMARY ---
     st.subheader("Molecule Summary")
-    st.write(f"Total molecules uploaded: {len(smiles_list)}")
-    st.write(f"Valid molecules: {len([m for m in standardized_mols if m is not None])}")
-    st.write(f"Invalid SMILES detected: {len(invalid_smiles)}")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Input", len(smiles_list))
+    col2.metric("Valid Molecules", len([m for m in standardized_mols if m is not None]))
+    col3.metric("Invalid detected", len(invalid_smiles))
 
     if invalid_smiles:
-        st.warning(f"Invalid SMILES: {invalid_smiles}")
+        st.warning(f"Invalid SMILES encountered: {', '.join(invalid_smiles)}")
 
-    # Display molecules
+    # --- PREVIEW ---
     st.subheader("Molecule Preview")
-    for mol in standardized_mols:
+    
+    # Use columns to display images in a grid rather than one long vertical list
+    cols = st.columns(3) 
+    for idx, mol in enumerate(standardized_mols):
         if mol:
-            st.image(Draw.MolToImage(mol, size=(300, 300)))
+            with cols[idx % 3]:
+                # Using the SMILES string as a caption
+                st.image(Draw.MolToImage(mol, size=(300, 300)), caption=smiles_list[idx])
