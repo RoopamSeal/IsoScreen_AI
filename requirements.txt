@@ -1,7 +1,6 @@
 streamlit
-rdkit-pypi
+rdkit
 torch
-deepchem
 pandas
 numpy
 scikit-learn
@@ -11,3 +10,4 @@ tqdm
 matplotlib
 plotly
 umap-learn
+
