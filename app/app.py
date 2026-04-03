@@ -61,10 +61,18 @@ if smiles_list:
     # --- PREVIEW ---
     st.subheader("Molecule Preview")
     
-    # Use columns to display images in a grid rather than one long vertical list
-    cols = st.columns(3) 
-    for idx, mol in enumerate(standardized_mols):
-        if mol:
+    # Filter out the Nones so we only try to display valid molecules
+    # We zip them so the caption always matches the right image
+    valid_data = [
+        (s, m) for s, m in zip(smiles_list, standardized_mols) if m is not None
+    ]
+    
+    if valid_data:
+        cols = st.columns(3) 
+        for idx, (smi, mol) in enumerate(valid_data):
             with cols[idx % 3]:
-                # Using the SMILES string as a caption
-                st.image(Draw.MolToImage(mol, size=(300, 300)), caption=smiles_list[idx])
+                # RDKit drawing is now safe because 'mol' is guaranteed to exist
+                img = Draw.MolToImage(mol, size=(300, 300))
+                st.image(img, caption=smi)
+    else:
+        st.info("No valid molecules to display.")
