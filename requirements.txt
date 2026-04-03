@@ -1,0 +1,13 @@
+streamlit
+rdkit-pypi
+torch
+deepchem
+pandas
+numpy
+scikit-learn
+transformers
+datasets
+tqdm
+matplotlib
+plotly
+umap-learn
