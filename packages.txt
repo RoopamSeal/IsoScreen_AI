@@ -1,4 +1,0 @@
-libxrender1
-libxext6
-libsm6
-libice6
