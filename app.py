@@ -1,28 +1,38 @@
 import streamlit as st
 import os
 import config
-from agent import graph
 
+# IMPORTANT: st.set_page_config must be the very first Streamlit command
 st.set_page_config(
     page_title="GraphDrugPred v1",
     page_icon="🧬",
     layout="wide"
 )
 
+# ==========================================
+# SECURE BACKEND API INITIALIZATION
+# ==========================================
+try:
+    # Pull the key from .streamlit/secrets.toml and set it in the environment
+    # LangChain's LLM node in agent.py will automatically detect it here.
+    os.environ["GOOGLE_API_KEY"] = st.secrets["GOOGLE_API_KEY"]
+except KeyError:
+    st.error("System Fault: Missing Backend API Key. Please configure .streamlit/secrets.toml.")
+    st.stop() # Halts execution until the key is provided
+
+# Import the graph only after the environment variables are safely set
+from agent import graph
+
 st.title("🧬 GraphDrugPred (v1)")
 st.caption("Modular Screening System: Sequence-Only Deep Embedding Target Classifier")
 
-# Configuration Interface Sidebar
+# Configuration Interface Sidebar (API key input removed)
 st.sidebar.header("Pipeline Configuration")
-user_api_key = st.sidebar.text_input("Google AI Studio API Key", type="password")
-
-if user_api_key:
-    os.environ["GOOGLE_API_KEY"] = user_api_key
-
-st.sidebar.markdown("---")
 st.sidebar.markdown(f"**Target Model Engine**: `{config.MODEL_NAME}`")
 st.sidebar.markdown(f"**Embedding Space Vector**: `{config.EMBEDDING_DIM} Dimensions`")
 st.sidebar.markdown(f"**System Threshold**: `{config.DRUGGABILITY_THRESHOLD}`")
+st.sidebar.markdown("---")
+st.sidebar.info("Status: System Authenticated & Ready")
 
 # Central Sequence Input Form
 st.markdown("### 1. Target Sequence Specifications")
