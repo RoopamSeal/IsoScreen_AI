@@ -92,15 +92,19 @@ def generate_report(state: AgentState) -> AgentState:
         verdict = "Druggable" if score >= config.DRUGGABILITY_THRESHOLD else "Non-Druggable"
         
         prompt = ChatPromptTemplate.from_template(
-            "You are acting as a Senior Principal Bioinformatician specializing in target assessment.\n"
-            "Review the quantitative indicators generated for this sequence sample:\n\n"
-            "- Total Sequence Length: {seq_len} Residues\n"
-            "- Target Druggability Likelihood: {score:.4f}\n"
-            "- Status Classification: {verdict}\n"
-            "- Agent Structural Confidence: {confidence:.4f}\n\n"
-            "Compose a concise, academic summary report.\n"
-            "Maintain professional, expert, objective domain jargon throughout."
-        )
+                    "You are acting as a Senior Principal Bioinformatician specializing in target assessment.\n"
+                    "Review the quantitative indicators generated for this sequence sample:\n\n"
+                    "- Total Sequence Length: {seq_len} Residues\n"
+                    "- Target Druggability Likelihood: {score:.4f}\n"
+                    "- Status Classification: {verdict}\n"
+                    "- Agent Structural Confidence: {confidence:.4f}\n\n"
+                    "Compose a concise, academic summary report divided explicitly into:\n"
+                    "### 1. Executive Screening Assessment\n"
+                    "### 2. Physical & Translation Insights\n"
+                    "### 3. Druggability Mechanism Deductions\n"
+                    "### 4. Downstream Assay Recommendations\n\n"
+                    "Maintain professional, expert, objective domain jargon throughout."
+                )
         
         chain = prompt | llm
         response = chain.invoke({
