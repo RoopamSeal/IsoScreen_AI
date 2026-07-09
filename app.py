@@ -7,11 +7,11 @@ st.set_page_config(
     layout="wide"
 )
 
-# Safely check if the key exists in Streamlit Secrets before loading the heavy ML graph
+# Safety check for Groq Key
 try:
-    _ = st.secrets["GOOGLE_API_KEY"]
+    _ = st.secrets["GROQ_API_KEY"]
 except KeyError:
-    st.error("Security Halt: GOOGLE_API_KEY is missing from your Streamlit Secrets.")
+    st.error("Security Halt: GROQ_API_KEY is missing from your Streamlit Secrets.")
     st.stop()
 
 # Import the graph after passing the security check
@@ -26,7 +26,7 @@ st.sidebar.markdown(f"**Target Model Engine**: `{config.MODEL_NAME}`")
 st.sidebar.markdown(f"**Embedding Space Vector**: `{config.EMBEDDING_DIM} Dimensions`")
 st.sidebar.markdown(f"**System Threshold**: `{config.DRUGGABILITY_THRESHOLD}`")
 st.sidebar.markdown("---")
-st.sidebar.success("Status: Authenticated via Streamlit Secrets")
+st.sidebar.success("Status: Authenticated via Groq LPUs")
 
 # Central Sequence Input Form
 st.markdown("### 1. Target Sequence Specifications")
