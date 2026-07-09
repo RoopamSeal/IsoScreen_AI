@@ -2,6 +2,7 @@ import os
 import re
 from typing import TypedDict, List, Optional
 import streamlit as st
+from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph, START, END
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -87,15 +88,8 @@ def generate_report(state: AgentState) -> AgentState:
         os.environ.pop("GOOGLE_GENAI_USE_VERTEXAI", None)
         
         # 2. Pull the key securely from Streamlit Secrets (Works locally and on cloud)
-        secure_api_key = st.secrets["GOOGLE_API_KEY"]
-        
-        # 3. Explicitly pass the key directly into the Chat model instance
-        llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash", 
-            temperature=0.1,
-            api_key=secure_api_key 
-        )
-        # -----------------------
+       secure_api_key = st.secrets["GROQ_API_KEY"]
+       llm = ChatGroq(model="llama3-8b-8192", temperature=0.1, api_key=secure_api_key)
         
         score = state["prediction"]
         verdict = "Druggable" if score >= config.DRUGGABILITY_THRESHOLD else "Non-Druggable"
