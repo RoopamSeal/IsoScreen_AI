@@ -17,7 +17,7 @@ except KeyError:
 # Import the graph after passing the security check
 from agent import graph
 
-st.title("🧬 GraphDrugPred (v1)")
+st.title("🧬 IsoScreenAI")
 st.caption("Modular Screening System: Sequence-Only Deep Embedding Target Classifier")
 
 # Configuration Interface Sidebar
