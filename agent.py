@@ -1,11 +1,9 @@
-import os
 import re
 from typing import TypedDict, List, Optional
 import streamlit as st
-from langchain_groq import ChatGroq
 from langgraph.graph import StateGraph, START, END
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_groq import ChatGroq  # <--- NEW IMPORT
 import config
 from predictor import ProteinPredictor
 
@@ -82,14 +80,15 @@ def generate_report(state: AgentState) -> AgentState:
     if state.get("errors"):
         return state
     try:
-        # --- THE FIX IS HERE ---
-        # 1. Strip out any ghost Google Cloud credentials that might confuse LangChain
-        os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
-        os.environ.pop("GOOGLE_GENAI_USE_VERTEXAI", None)
+        # Pull the key securely from Streamlit
+        secure_api_key = st.secrets["GROQ_API_KEY"]
         
-        # 2. Pull the key securely from Streamlit Secrets (Works locally and on cloud)
-       secure_api_key = st.secrets["GROQ_API_KEY"]
-       llm = ChatGroq(model="llama3-8b-8192", temperature=0.1, api_key=secure_api_key)
+        # Initialize Groq Llama 3 (Ultra-fast inference)
+        llm = ChatGroq(
+            model_name="llama3-8b-8192", 
+            temperature=0.1,
+            api_key=secure_api_key 
+        )
         
         score = state["prediction"]
         verdict = "Druggable" if score >= config.DRUGGABILITY_THRESHOLD else "Non-Druggable"
