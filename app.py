@@ -2,7 +2,7 @@ import streamlit as st
 import config
 
 st.set_page_config(
-    page_title="GraphDrugPred v1",
+    page_title="IsoScreenAI",
     page_icon="🧬",
     layout="wide"
 )
