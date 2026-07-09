@@ -1,5 +1,5 @@
-import streamlit as st
 import os
+import streamlit as st
 import config
 
 # IMPORTANT: st.set_page_config must be the very first Streamlit command
@@ -12,21 +12,28 @@ st.set_page_config(
 # ==========================================
 # SECURE BACKEND API INITIALIZATION
 # ==========================================
+# 1. Nuke any lingering Google Cloud settings causing the OAuth error
+for env_var in ["GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_CLOUD_PROJECT"]:
+    os.environ.pop(env_var, None)
+
+# 2. Force the environment to use your exact Streamlit secret
 try:
-    # Pull the key from .streamlit/secrets.toml and set it in the environment
     # LangChain's LLM node in agent.py will automatically detect it here.
     os.environ["GOOGLE_API_KEY"] = st.secrets["GOOGLE_API_KEY"]
 except KeyError:
-    st.error("System Fault: Missing Backend API Key. Please configure .streamlit/secrets.toml.")
+    st.error("System Fault: Missing GOOGLE_API_KEY in .streamlit/secrets.toml.")
     st.stop() # Halts execution until the key is provided
 
-# Import the graph only after the environment variables are safely set
+# Import the graph ONLY after the environment variables are safely set and scrubbed
 from agent import graph
 
+# ==========================================
+# UI CONSTRUCTION
+# ==========================================
 st.title("🧬 GraphDrugPred (v1)")
 st.caption("Modular Screening System: Sequence-Only Deep Embedding Target Classifier")
 
-# Configuration Interface Sidebar (API key input removed)
+# Configuration Interface Sidebar
 st.sidebar.header("Pipeline Configuration")
 st.sidebar.markdown(f"**Target Model Engine**: `{config.MODEL_NAME}`")
 st.sidebar.markdown(f"**Embedding Space Vector**: `{config.EMBEDDING_DIM} Dimensions`")
