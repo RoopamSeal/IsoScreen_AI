@@ -8,3 +8,6 @@ langgraph>=0.0.15
 langchain-core>=0.1.0
 langchain-google-genai>=0.0.5
 numpy>=1.24.0
+langchain-groq
+google-generativeai
+numpy
