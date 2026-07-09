@@ -1,5 +1,7 @@
+import os
 import re
 from typing import TypedDict, List, Optional
+import streamlit as st
 from langgraph.graph import StateGraph, START, END
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate
@@ -19,7 +21,6 @@ class AgentState(TypedDict):
     errors: List[str]
 
 def validate_fasta(state: AgentState) -> AgentState:
-    """Sanitizes raw unstructured inputs down to structured standard AA characters."""
     errors = list(state.get("errors", []))
     fasta = state.get("fasta_content", "").strip()
 
@@ -34,7 +35,6 @@ def validate_fasta(state: AgentState) -> AgentState:
         line = line.strip()
         if not line or line.startswith(">"):
             continue
-        # Strip illegal characters, numerical markers, and white spaces
         cleaned = re.sub(r'[\s\d]', '', line).upper()
         sequence_lines.append(cleaned)
 
@@ -53,7 +53,6 @@ def validate_fasta(state: AgentState) -> AgentState:
     return {**state, "sequence": full_sequence, "errors": errors}
 
 def extract_embeddings(state: AgentState) -> AgentState:
-    """Transforms raw verified strings into standardized model feature spaces."""
     if state.get("errors"):
         return state
     try:
@@ -65,15 +64,12 @@ def extract_embeddings(state: AgentState) -> AgentState:
         return {**state, "errors": errors}
 
 def predict_druggability(state: AgentState) -> AgentState:
-    """Interrogates classical layers using extracted target protein vectors."""
     if state.get("errors"):
         return state
     try:
         import numpy as np
         vector = np.array(state["embedding"])
         probability = predictor_instance.predict(vector)
-        
-        # Calculate standard deviation margin scale mapped relative to classification threshold
         confidence = abs(probability - config.DRUGGABILITY_THRESHOLD) * 2
         return {**state, "prediction": probability, "confidence": confidence}
     except Exception as e:
@@ -82,12 +78,24 @@ def predict_druggability(state: AgentState) -> AgentState:
         return {**state, "errors": errors}
 
 def generate_report(state: AgentState) -> AgentState:
-    """Constructs academic summary insights via specialized remote LLM agents."""
     if state.get("errors"):
         return state
     try:
-        # Pulls GOOGLE_API_KEY from environment contexts automatically
-        llm = ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.1)
+        # --- THE FIX IS HERE ---
+        # 1. Strip out any ghost Google Cloud credentials that might confuse LangChain
+        os.environ.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+        os.environ.pop("GOOGLE_GENAI_USE_VERTEXAI", None)
+        
+        # 2. Pull the key securely from Streamlit Secrets (Works locally and on cloud)
+        secure_api_key = st.secrets["GOOGLE_API_KEY"]
+        
+        # 3. Explicitly pass the key directly into the Chat model instance
+        llm = ChatGoogleGenerativeAI(
+            model="gemini-2.5-flash", 
+            temperature=0.1,
+            api_key=secure_api_key 
+        )
+        # -----------------------
         
         score = state["prediction"]
         verdict = "Druggable" if score >= config.DRUGGABILITY_THRESHOLD else "Non-Druggable"
@@ -99,11 +107,7 @@ def generate_report(state: AgentState) -> AgentState:
             "- Target Druggability Likelihood: {score:.4f}\n"
             "- Status Classification: {verdict}\n"
             "- Agent Structural Confidence: {confidence:.4f}\n\n"
-            "Compose a concise, academic summary report divided explicitly into:\n"
-            "### 1. Executive Screening Assessment\n"
-            "### 2. Physical & Translation Insights\n"
-            "### 3. Druggability Mechanism Deductions\n"
-            "### 4. Downstream Assay Recommendations\n\n"
+            "Compose a concise, academic summary report.\n"
             "Maintain professional, expert, objective domain jargon throughout."
         )
         
