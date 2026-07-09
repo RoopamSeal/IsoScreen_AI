@@ -1,35 +1,22 @@
-import os
 import streamlit as st
 import config
 
-# IMPORTANT: st.set_page_config must be the very first Streamlit command
 st.set_page_config(
     page_title="GraphDrugPred v1",
     page_icon="🧬",
     layout="wide"
 )
 
-# ==========================================
-# SECURE BACKEND API INITIALIZATION
-# ==========================================
-# 1. Nuke any lingering Google Cloud settings causing the OAuth error
-for env_var in ["GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_CLOUD_PROJECT"]:
-    os.environ.pop(env_var, None)
-
-# 2. Force the environment to use your exact Streamlit secret
+# Safely check if the key exists in Streamlit Secrets before loading the heavy ML graph
 try:
-    # LangChain's LLM node in agent.py will automatically detect it here.
-    os.environ["GOOGLE_API_KEY"] = st.secrets["GOOGLE_API_KEY"]
+    _ = st.secrets["GOOGLE_API_KEY"]
 except KeyError:
-    st.error("System Fault: Missing GOOGLE_API_KEY in .streamlit/secrets.toml.")
-    st.stop() # Halts execution until the key is provided
+    st.error("Security Halt: GOOGLE_API_KEY is missing from your Streamlit Secrets.")
+    st.stop()
 
-# Import the graph ONLY after the environment variables are safely set and scrubbed
+# Import the graph after passing the security check
 from agent import graph
 
-# ==========================================
-# UI CONSTRUCTION
-# ==========================================
 st.title("🧬 GraphDrugPred (v1)")
 st.caption("Modular Screening System: Sequence-Only Deep Embedding Target Classifier")
 
@@ -39,7 +26,7 @@ st.sidebar.markdown(f"**Target Model Engine**: `{config.MODEL_NAME}`")
 st.sidebar.markdown(f"**Embedding Space Vector**: `{config.EMBEDDING_DIM} Dimensions`")
 st.sidebar.markdown(f"**System Threshold**: `{config.DRUGGABILITY_THRESHOLD}`")
 st.sidebar.markdown("---")
-st.sidebar.info("Status: System Authenticated & Ready")
+st.sidebar.success("Status: Authenticated via Streamlit Secrets")
 
 # Central Sequence Input Form
 st.markdown("### 1. Target Sequence Specifications")
@@ -49,15 +36,10 @@ input_text = st.text_area(
     height=180
 )
 
-uploaded_file = st.file_uploader("Or select standard .fasta or .fa file profiles", type=["fasta", "fa"])
-if uploaded_file is not None:
-    input_text = uploaded_file.read().decode("utf-8")
-
 if st.button("Execute Pipeline Diagnostics", type="primary"):
     if not input_text.strip():
         st.error("Execution Blocked: Please submit a valid input sequence payload.")
     else:
-        # Define execution payload
         execution_payload = {
             "fasta_content": input_text,
             "sequence": "",
@@ -79,7 +61,6 @@ if st.button("Execute Pipeline Diagnostics", type="primary"):
             else:
                 state_monitor.update(label="Graph Sequence Orchestration Finished Successfully", state="complete")
         
-        # Display Dashboard Analytics upon pipeline completion
         if runtime_output.get("prediction") is not None:
             st.markdown("### 2. Screening Metrics Dashboard")
             metric_cols = st.columns(3)
