@@ -85,7 +85,7 @@ def generate_report(state: AgentState) -> AgentState:
         
         # Initialize Groq Llama 3 (Ultra-fast inference)
         llm = ChatGroq(
-            model_name="llama3-8b-8192", 
+            model_name="llama-3.1-8b-instant", 
             temperature=0.1,
             api_key=secure_api_key 
         )
