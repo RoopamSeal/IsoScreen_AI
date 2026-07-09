@@ -1,9 +1,10 @@
+import os
 import re
+import numpy as np
 from typing import TypedDict, List, Optional
-import streamlit as st
 from langgraph.graph import StateGraph, START, END
 from langchain_core.prompts import ChatPromptTemplate
-from langchain_groq import ChatGroq  # <--- NEW IMPORT
+from langchain_groq import ChatGroq
 import config
 from predictor import ProteinPredictor
 
@@ -19,23 +20,25 @@ class AgentState(TypedDict):
     report: Optional[str]
     errors: List[str]
 
+
+# ==========================================
+# NODE DEFINITIONS
+# ==========================================
+
 def validate_fasta(state: AgentState) -> AgentState:
-    errors = list(state.get("errors", []))
+    """Sanitizes raw unstructured inputs down to structured standard AA characters."""
+    errors = state.get("errors", [])
     fasta = state.get("fasta_content", "").strip()
 
     if not fasta:
         errors.append("Validation Error: Input payload was parsed empty.")
         return {**state, "errors": errors}
 
-    lines = fasta.split("\n")
-    sequence_lines = []
-    
-    for line in lines:
-        line = line.strip()
-        if not line or line.startswith(">"):
-            continue
-        cleaned = re.sub(r'[\s\d]', '', line).upper()
-        sequence_lines.append(cleaned)
+    sequence_lines = [
+        re.sub(r'[\s\d]', '', line).upper()
+        for line in fasta.split("\n")
+        if line.strip() and not line.startswith(">")
+    ]
 
     full_sequence = "".join(sequence_lines)
     canonical_amino_acids = set("ACDEFGHIKLMNPQRSTVWY")
@@ -51,43 +54,38 @@ def validate_fasta(state: AgentState) -> AgentState:
 
     return {**state, "sequence": full_sequence, "errors": errors}
 
+
 def extract_embeddings(state: AgentState) -> AgentState:
-    if state.get("errors"):
-        return state
+    """Transforms raw verified strings into standardized model feature spaces."""
     try:
         embedding_array = predictor_instance.get_embedding(state["sequence"])
         return {**state, "embedding": embedding_array.tolist()}
     except Exception as e:
-        errors = list(state.get("errors", []))
+        errors = state.get("errors", [])
         errors.append(f"Embedding Extraction Failure: {str(e)}")
         return {**state, "errors": errors}
 
+
 def predict_druggability(state: AgentState) -> AgentState:
-    if state.get("errors"):
-        return state
+    """Interrogates classical layers using extracted target protein vectors."""
     try:
-        import numpy as np
         vector = np.array(state["embedding"])
         probability = predictor_instance.predict(vector)
         confidence = abs(probability - config.DRUGGABILITY_THRESHOLD) * 2
         return {**state, "prediction": probability, "confidence": confidence}
     except Exception as e:
-        errors = list(state.get("errors", []))
+        errors = state.get("errors", [])
         errors.append(f"Prediction Pipeline Failure: {str(e)}")
         return {**state, "errors": errors}
 
+
 def generate_report(state: AgentState) -> AgentState:
-    if state.get("errors"):
-        return state
+    """Constructs academic summary insights via specialized remote LLM agents."""
     try:
-        # Pull the key securely from Streamlit
-        secure_api_key = st.secrets["GROQ_API_KEY"]
-        
-        # Initialize Groq Llama 3 (Ultra-fast inference)
+        # LangChain automatically detects os.environ["GROQ_API_KEY"] set by app.py
         llm = ChatGroq(
             model_name="llama-3.1-8b-instant", 
-            temperature=0.1,
-            api_key=secure_api_key 
+            temperature=0.1
         )
         
         score = state["prediction"]
@@ -114,7 +112,7 @@ def generate_report(state: AgentState) -> AgentState:
         return {**state, "report": response.content}
         
     except Exception as e:
-        errors = list(state.get("errors", []))
+        errors = state.get("errors", [])
         errors.append(f"Reporting Subsystem Warning: {str(e)}")
         fallback = (
             f"### Automated Summary Report (Fallback Mode)\n"
@@ -124,17 +122,44 @@ def generate_report(state: AgentState) -> AgentState:
         )
         return {**state, "report": fallback, "errors": errors}
 
-# Workflow Graph Assembly
+
+# ==========================================
+# GRAPH ROUTING & ASSEMBLY
+# ==========================================
+
+def route_on_error(state: AgentState) -> str:
+    """Checks the state for errors. Routes to END if found, otherwise continues."""
+    return "error" if state.get("errors") else "continue"
+
 builder = StateGraph(AgentState)
+
+# Add Nodes
 builder.add_node("validate_fasta", validate_fasta)
 builder.add_node("extract_embeddings", extract_embeddings)
 builder.add_node("predict_druggability", predict_druggability)
 builder.add_node("generate_report", generate_report)
 
+# Add Edges with Fail-Fast Routing
 builder.add_edge(START, "validate_fasta")
-builder.add_edge("validate_fasta", "extract_embeddings")
-builder.add_edge("extract_embeddings", "predict_druggability")
-builder.add_edge("predict_druggability", "generate_report")
+
+builder.add_conditional_edges(
+    "validate_fasta", 
+    route_on_error, 
+    {"error": END, "continue": "extract_embeddings"}
+)
+
+builder.add_conditional_edges(
+    "extract_embeddings", 
+    route_on_error, 
+    {"error": END, "continue": "predict_druggability"}
+)
+
+builder.add_conditional_edges(
+    "predict_druggability", 
+    route_on_error, 
+    {"error": END, "continue": "generate_report"}
+)
+
 builder.add_edge("generate_report", END)
 
 graph = builder.compile()
