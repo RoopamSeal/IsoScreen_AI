@@ -103,7 +103,7 @@ def generate_report(state: AgentState) -> AgentState:
                     "### 2. Physical & Translation Insights\n"
                     "### 3. Druggability Mechanism Deductions\n"
                     "### 4. Downstream Assay Recommendations\n\n"
-                    "Maintain professional, expert, objective domain jargon throughout."
+                    "Maintain professional, expert, objective domain jargon throughout. Print only above deliverables. Do not add any additional information or words."
                 )
         
         chain = prompt | llm
