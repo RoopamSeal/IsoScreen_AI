@@ -14,7 +14,7 @@ from predictor import ProteinPredictor
 # ==========================================
 # PAGE CONFIGURATION & INITIALIZATION
 # ==========================================
-st.set_page_config(page_title="IsoScreenAI v2", page_icon="🧬", layout="wide")
+st.set_page_config(page_title="IsoScreenAI", page_icon="🧬", layout="wide")
 
 # Lazy instantiate sequence modeling infrastructure
 @st.cache_resource
@@ -198,7 +198,7 @@ graph = builder.compile()
 # ==========================================
 # FRONT-END USER INTERACTION LAYER
 # ==========================================
-st.title("🧬 IsoScreenAI (v2)")
+st.title("🧬 IsoScreenAI")
 st.markdown("Advanced Target Structural Screening and Computational Druggability Assessment Platform")
 
 # Multi-Option Sequence Input Framework
@@ -235,11 +235,11 @@ if st.button("Run IsoScreenAI Diagnostics Pipeline", type="primary"):
                 # ---------------------------------------------------------
                 # 1. METRICS ROW
                 # ---------------------------------------------------------
-                st.markdown("### 1. Unified Diagnostic Matrix")
+                st.markdown("### 1. Diagnostic Matrix")
                 m_cols = st.columns(4)
                 
                 m_cols[0].metric(
-                    label="Druggability Probability", 
+                    label="Druggability Score", 
                     value=f"{runtime_output['prediction']:.4f}",
                     help="Sequence-derived probability calculated by the transformer-driven classification framework."
                 )
@@ -301,7 +301,7 @@ if st.button("Run IsoScreenAI Diagnostics Pipeline", type="primary"):
                     st.plotly_chart(fig_radar, use_container_width=True)
                 
                 # Dynamic Heatmap Generation Bound to Calculated Matrix Dimensions
-                st.markdown("#### Predicted Aligned Error (PAE) Matrix Verification")
+                st.markdown("#### Predicted Aligned Error (PAE) Matrix")
                 fig_heatmap = px.imshow(
                     runtime_output["pae_matrix"],
                     labels=dict(x="Scored Residue Pos", y="Aligned Residue Pos", color="Expected Error (Å)"),
