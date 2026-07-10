@@ -11,3 +11,4 @@ numpy>=1.24.0
 langchain-groq
 google-generativeai
 numpy
+plotly
