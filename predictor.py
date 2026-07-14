@@ -7,9 +7,11 @@ from sklearn.ensemble import RandomForestClassifier
 import config
 
 class ProteinPredictor:
-    def __init__(self):
-        self.device = torch.device("cpu") # Streamlit Cloud free tier is CPU-only
-        self.tokenizer = AutoTokenizer.from_pretrained(config.MODEL_NAME)
+    def __init__(self, tokenizer, model):
+        self.device = torch.device("cpu")
+        self.tokenizer = tokenizer
+        self.model = model.to(self.device)
+        self.model.eval()
         
         # Load the model in strict evaluation mode without gradient memory maps
         with torch.no_grad():
