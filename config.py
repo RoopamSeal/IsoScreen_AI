@@ -88,7 +88,6 @@ MAX_RETRIES = 3
 # ===========================================================
 
 LLM_MODEL = "llama-3.3-70b-versatile"
-
 LLM_TEMPERATURE = 0.1
 
 # ===========================================================
@@ -97,25 +96,17 @@ LLM_TEMPERATURE = 0.1
 
 PAE_MAX_SIZE = 200
 
-# Prevents memory explosion for long proteins.
-# Example:
-# 500 aa -> 500x500 matrix
-# 2000 aa -> limited to 200x200
-
 # ===========================================================
 # VALID AMINO ACIDS
 # ===========================================================
 
-VALID_AMINO_ACIDS = set(
-    "ACDEFGHIKLMNPQRSTVWY"
-)
+VALID_AMINO_ACIDS = set("ACDEFGHIKLMNPQRSTVWY")
 
 # ===========================================================
 # LOGGING
 # ===========================================================
 
 LOG_LEVEL = "INFO"
-
 LOG_FILE = LOG_DIR / "isoscreenai.log"
 
 # ===========================================================
@@ -123,7 +114,6 @@ LOG_FILE = LOG_DIR / "isoscreenai.log"
 # ===========================================================
 
 REPORT_TITLE = "IsoScreenAI Target Assessment Report"
-
 REPORT_AUTHOR = "GraphDrugPred"
 
 # ===========================================================
@@ -131,9 +121,7 @@ REPORT_AUTHOR = "GraphDrugPred"
 # ===========================================================
 
 APP_NAME = "IsoScreenAI"
-
 APP_ICON = "🧬"
-
 PAGE_LAYOUT = "wide"
 
 # ===========================================================
@@ -141,13 +129,9 @@ PAGE_LAYOUT = "wide"
 # ===========================================================
 
 ENABLE_REPORT_GENERATION = True
-
 ENABLE_STRUCTURAL_SIMULATION = True
-
 ENABLE_PAE_VISUALIZATION = True
-
 ENABLE_RADAR_CHART = True
-
 ENABLE_GAUGE_CHART = True
 
 # ===========================================================
