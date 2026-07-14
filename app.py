@@ -9,6 +9,7 @@ from langgraph.graph import StateGraph, START, END
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_groq import ChatGroq
 import config
+from transformers import AutoTokenizer, AutoModel
 from predictor import ProteinPredictor
 
 # ==========================================
