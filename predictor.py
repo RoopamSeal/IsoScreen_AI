@@ -8,11 +8,16 @@ import config
 
 class ProteinPredictor:
     def __init__(self):
-        """Initializes tokenizers and models with automatic CPU/GPU resource handling."""
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.device = torch.device("cpu") # Streamlit Cloud free tier is CPU-only
         self.tokenizer = AutoTokenizer.from_pretrained(config.MODEL_NAME)
-        self.model = AutoModel.from_pretrained(config.MODEL_NAME).to(self.device)
-        self.model.eval()
+        
+        # Load the model in strict evaluation mode without gradient memory maps
+        with torch.no_grad():
+            self.model = AutoModel.from_pretrained(
+                config.MODEL_NAME, 
+                low_cpu_mem_usage=True # Tells Hugging Face to optimize CPU RAM allocation
+            ).to(self.device)
+            self.model.eval()
 
     def get_embedding(self, sequence: str) -> np.ndarray:
         """Tokenizes sequences and applies token-wise mean pooling over spatial dimensions."""
