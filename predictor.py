@@ -1,67 +1,196 @@
-import os
-import torch
-import numpy as np
+"""
+===========================================================
+GraphDrugPred / IsoScreenAI
+Protein Predictor Module
+===========================================================
+
+Responsibilities
+----------------
+1. Load ESM-2 tokenizer
+2. Load ESM-2 model
+3. Generate protein embeddings
+4. Load trained classifier
+5. Predict druggability probability
+"""
+
+from pathlib import Path
+
 import joblib
-from transformers import AutoTokenizer, AutoModel
+import numpy as np
+import torch
 from sklearn.ensemble import RandomForestClassifier
+from transformers import AutoModel, AutoTokenizer
+
 import config
 
+
 class ProteinPredictor:
-    def __init__(self, tokenizer, model):
-        self.device = torch.device("cpu")
-        self.tokenizer = tokenizer
-        self.model = model.to(self.device)
+    """
+    Protein embedding + prediction pipeline.
+    """
+
+    def __init__(self):
+
+        self.device = torch.device(config.DEVICE)
+
+        print(f"Loading tokenizer: {config.MODEL_NAME}")
+
+        self.tokenizer = AutoTokenizer.from_pretrained(
+            config.MODEL_NAME,
+            cache_dir=config.CACHE_DIR
+        )
+
+        print(f"Loading ESM2 model: {config.MODEL_NAME}")
+
+        self.model = AutoModel.from_pretrained(
+            config.MODEL_NAME,
+            cache_dir=config.CACHE_DIR
+        )
+
+        self.model.to(self.device)
         self.model.eval()
-        
-        # Load the model in strict evaluation mode without gradient memory maps
-        with torch.no_grad():
-            self.model = AutoModel.from_pretrained(
-                config.MODEL_NAME, 
-                low_cpu_mem_usage=True # Tells Hugging Face to optimize CPU RAM allocation
-            ).to(self.device)
-            self.model.eval()
+
+        print("Loading classifier...")
+
+        self.classifier = self._load_classifier()
+
+        print("ProteinPredictor initialized successfully.")
+
+    ####################################################################
+    # EMBEDDING EXTRACTION
+    ####################################################################
 
     def get_embedding(self, sequence: str) -> np.ndarray:
-        """Tokenizes sequences and applies token-wise mean pooling over spatial dimensions."""
-        inputs = self.tokenizer(sequence, return_tensors="pt").to(self.device)
-        
+        """
+        Convert a protein sequence into an ESM embedding.
+
+        Returns
+        -------
+        numpy.ndarray
+            Shape = (EMBEDDING_DIM,)
+        """
+
+        if len(sequence) == 0:
+            raise ValueError("Empty protein sequence.")
+
+        if len(sequence) > config.MAX_SEQUENCE_LENGTH:
+            sequence = sequence[: config.MAX_SEQUENCE_LENGTH]
+
+        inputs = self.tokenizer(
+            sequence,
+            return_tensors="pt",
+            add_special_tokens=True
+        )
+
+        inputs = {k: v.to(self.device) for k, v in inputs.items()}
+
         with torch.no_grad():
+
             outputs = self.model(**inputs)
-        
-        # Pull output representation maps: Shape [Batch, Sequence_Len, Hidden_Dim]
-        last_hidden_state = outputs.last_hidden_state[0]
-        
-        # Exclude special boundary tokens (<cls> at index 0, <eos> at terminal position)
-        if last_hidden_state.shape[0] > 2:
-            seq_embeddings = last_hidden_state[1:-1]
-        else:
-            seq_embeddings = last_hidden_state
-            
-        # Compute spatial mean pooling across remaining residue sequence dimensions
-        mean_embedding = torch.mean(seq_embeddings, dim=0)
-        return mean_embedding.cpu().numpy()
 
-    def predict(self, embedding: np.ndarray) -> float:
-        """Scores spatial array maps using the serialized downstream Classifier configuration."""
-        if not os.path.exists(config.CLASSIFIER_PATH):
-            self._train_fallback_classifier()
+        hidden = outputs.last_hidden_state[0]
 
-        classifier = joblib.load(config.CLASSIFIER_PATH)
-        reshaped_input = embedding.reshape(1, -1)
-        
-        # Extract targeted probabilities mapped to the positive classification label index
-        probability = classifier.predict_proba(reshaped_input)[0][1]
-        return float(probability)
+        # Remove CLS and EOS tokens
+
+        if hidden.shape[0] > 2:
+            hidden = hidden[1:-1]
+
+        embedding = hidden.mean(dim=0)
+
+        return embedding.cpu().numpy().astype(np.float32)
+
+    ####################################################################
+    # CLASSIFIER
+    ####################################################################
+
+    def _load_classifier(self):
+
+        classifier_path = Path(config.CLASSIFIER_PATH)
+
+        if classifier_path.exists():
+
+            print("Existing classifier found.")
+
+            return joblib.load(classifier_path)
+
+        print("Classifier not found.")
+        print("Creating fallback classifier...")
+
+        return self._train_fallback_classifier()
+
+    ####################################################################
+    # FALLBACK MODEL
+    ####################################################################
 
     def _train_fallback_classifier(self):
-        """Generates mock patterns to bootstrap structural classifier files automatically."""
-        print("[System Info] Serialized weights missing. Instantiating baseline fallback matrix...")
-        np.random.seed(42)
-        
-        # Construct synthetic balancing data to secure initialization matrix conditions
-        X_train = np.random.randn(100, config.EMBEDDING_DIM)
-        y_train = np.random.randint(0, 2, size=100)
 
-        clf = RandomForestClassifier(n_estimators=50, random_state=42)
-        clf.fit(X_train, y_train)
+        np.random.seed(config.RANDOM_STATE)
+
+        X = np.random.normal(
+            size=(500, config.EMBEDDING_DIM)
+        )
+
+        y = np.random.randint(
+            0,
+            2,
+            size=500
+        )
+
+        clf = RandomForestClassifier(
+            n_estimators=config.RF_N_ESTIMATORS,
+            random_state=config.RANDOM_STATE
+        )
+
+        clf.fit(X, y)
+
         joblib.dump(clf, config.CLASSIFIER_PATH)
+
+        print("Fallback classifier saved.")
+
+        return clf
+
+    ####################################################################
+    # PREDICTION
+    ####################################################################
+
+    def predict(self, embedding: np.ndarray) -> float:
+        """
+        Predict probability of druggability.
+
+        Returns
+        -------
+        float
+            Probability between 0 and 1.
+        """
+
+        embedding = embedding.reshape(1, -1)
+
+        probability = self.classifier.predict_proba(
+            embedding
+        )[0][1]
+
+        return float(probability)
+
+    ####################################################################
+    # COMPLETE PIPELINE
+    ####################################################################
+
+    def predict_from_sequence(self, sequence: str):
+
+        embedding = self.get_embedding(sequence)
+
+        probability = self.predict(embedding)
+
+        confidence = abs(
+            probability - config.DRUGGABILITY_THRESHOLD
+        ) * 2
+
+        return {
+
+            "embedding": embedding,
+
+            "prediction": probability,
+
+            "confidence": confidence
+
+        }
