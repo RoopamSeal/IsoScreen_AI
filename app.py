@@ -17,7 +17,7 @@ from predictor import ProteinPredictor
 st.set_page_config(page_title="IsoScreenAI", page_icon="🧬", layout="wide")
 
 # Lazy instantiate sequence modeling infrastructure
-@st.cache_resource
+@st.cache_resource(show_spinner="Loading ESM-2 Protein Language Model into memory...")
 def load_predictor():
     return ProteinPredictor()
 
