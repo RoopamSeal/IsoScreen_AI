@@ -17,9 +17,23 @@ from predictor import ProteinPredictor
 st.set_page_config(page_title="IsoScreenAI", page_icon="🧬", layout="wide")
 
 # Lazy instantiate sequence modeling infrastructure
-@st.cache_resource(show_spinner="Loading ESM-2 Protein Language Model into memory...")
+@st.cache_resource(show_spinner="Loading ESM-2 Protein Language Model...")
 def load_predictor():
-    return ProteinPredictor()
+    st.write("✅ Step 1: Starting predictor initialization")
+
+    st.write("⏳ Step 2: Loading tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(config.MODEL_NAME)
+    st.write("✅ Tokenizer loaded")
+
+    st.write("⏳ Step 3: Loading model...")
+    model = AutoModel.from_pretrained(config.MODEL_NAME)
+    st.write("✅ Model loaded")
+
+    from predictor import ProteinPredictor
+    predictor = ProteinPredictor(tokenizer=tokenizer, model=model)
+    st.write("✅ Predictor created")
+
+    return predictor
 
 predictor_instance = load_predictor()
 
