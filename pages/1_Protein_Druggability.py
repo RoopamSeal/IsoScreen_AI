@@ -7,13 +7,20 @@ st.set_page_config(page_title="Protein Druggability & Function Predictor", page_
 st.title("🧪 Protein Druggability & Function Predictor")
 st.markdown("Evaluate target proteins using **ESM-2 embeddings**, physicochemical properties, **Gene Ontology (GO) functional prediction**, and **Groq AI reporting**.")
 
-# Sidebar for API Key
-st.sidebar.header("🔑 AI Configuration")
-groq_api_key = st.sidebar.text_input("Enter Groq API Key", type="password", help="Required for GO term prediction and AI reports.")
+# Retrieve Groq API key from Streamlit Secrets
+groq_api_key = None
+try:
+    groq_api_key = st.secrets.get("GROQ_API_KEY")
+except Exception:
+    pass
+
+if not groq_api_key:
+    st.sidebar.warning("⚠️ `GROQ_API_KEY` not found in Streamlit Secrets. AI-generated reports and GO term predictions will be disabled.")
 
 # Input area
 seq_input = st.text_area(
     "Protein Sequence (FASTA format or Raw Amino Acids)",
+    value=">Target_Protein_1\nMKTAYIAKQRQISFVKSHFSRQLEERGLIEVQAPILSRVGDGTQDNLSGAEKAVQVKVKALP",
     height=150
 )
 
@@ -57,7 +64,7 @@ if st.button("Run Pipeline"):
                     st.markdown("Multi-label prediction of molecular functions, biological processes, and cellular components derived from sequence embeddings.")
                     
                     if not groq_api_key:
-                        st.warning("⚠️ Enter your Groq API key in the sidebar to generate functional GO predictions.")
+                        st.warning("⚠️ Groq API key is missing from Streamlit secrets. Configure `GROQ_API_KEY` in `.streamlit/secrets.toml` to view functional predictions.")
                     else:
                         with st.spinner("Predicting GO terms using model features..."):
                             go_prediction = predict_gene_ontology_terms(metrics, groq_api_key)
@@ -66,7 +73,7 @@ if st.button("Run Pipeline"):
                 with tab3:
                     st.subheader("Executive Research Report")
                     if not groq_api_key:
-                        st.warning("⚠️ Enter your Groq API key in the sidebar to unlock the AI research report.")
+                        st.warning("⚠️ Groq API key is missing from Streamlit secrets. Configure `GROQ_API_KEY` in `.streamlit/secrets.toml` to view AI reports.")
                     else:
                         with st.spinner("Generating expert report with Groq..."):
                             report = generate_groq_report(metrics, groq_api_key)
