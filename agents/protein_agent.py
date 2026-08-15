@@ -1,20 +1,16 @@
 import os
 import torch
 import numpy as np
-import transformers
 from transformers import AutoTokenizer, AutoModel
 from Bio.SeqUtils import ProtParam
 from groq import Groq
 from config import ESM_MODEL_NAME, GROQ_MODEL_NAME
 
-# Suppress unnecessary transformer warnings
-transformers.logging.set_verbosity_error()
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-def load_esm_model():
+def load_esm_model(hf_token: str = None):
     """Loads the lightweight ESM-2 model and tokenizer from HuggingFace."""
-    tokenizer = AutoTokenizer.from_pretrained(ESM_MODEL_NAME)
-    model = AutoModel.from_pretrained(ESM_MODEL_NAME)
+    token_arg = hf_token if hf_token and hf_token.strip() else None
+    tokenizer = AutoTokenizer.from_pretrained(ESM_MODEL_NAME, token=token_arg)
+    model = AutoModel.from_pretrained(ESM_MODEL_NAME, token=token_arg)
     model.eval()
     return tokenizer, model
 
@@ -28,7 +24,7 @@ def clean_fasta_sequence(raw_input: str) -> str:
     clean_seq = "".join(sequence_lines).upper()
     return clean_seq
 
-def analyze_protein_sequence(sequence: str):
+def analyze_protein_sequence(sequence: str, hf_token: str = None):
     """
     Performs BioPython physicochemical analysis and extracts 
     ESM-2 embedding features to compute a druggability confidence score.
@@ -47,7 +43,7 @@ def analyze_protein_sequence(sequence: str):
     aromaticity = analysed_seq.aromaticity()
     
     # 2. ESM-2 Embedding Feature Extraction
-    tokenizer, model = load_esm_model()
+    tokenizer, model = load_esm_model(hf_token=hf_token)
     inputs = tokenizer(clean_seq, return_tensors="pt", truncation=True, max_length=1024)
     
     with torch.no_grad():
