@@ -6,6 +6,9 @@ from Bio.SeqUtils import ProtParam
 from groq import Groq
 from config import ESM_MODEL_NAME, GROQ_MODEL_NAME
 
+transformers.logging.set_verbosity_error()
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
 def load_esm_model(hf_token: str = None):
     """Loads the lightweight ESM-2 model and tokenizer from HuggingFace with an optional token."""
     kwargs = {}
