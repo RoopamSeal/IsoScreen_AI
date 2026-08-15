@@ -5,32 +5,25 @@ from transformers import AutoTokenizer, AutoModel
 from Bio.SeqUtils import ProtParam
 from groq import Groq
 
-# Load lightweight ESM-2 model and tokenizer globally (or cached)
 MODEL_NAME = "facebook/esm2_t6_8M_UR50D"
 
-def load_esm_model():
-    """Loads the lightweight ESM-2 model and tokenizer from HuggingFace."""
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    model = AutoModel.from_pretrained(MODEL_NAME)
+def load_esm_model(hf_token: str = None):
+    """Loads the lightweight ESM-2 model and tokenizer from HuggingFace with an optional token."""
+    kwargs = {}
+    if hf_token and hf_token.strip():
+        kwargs["token"] = hf_token.strip()
+        
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, **kwargs)
+    model = AutoModel.from_pretrained(MODEL_NAME, **kwargs)
     model.eval()
     return tokenizer, model
 
-def clean_fasta_sequence(sequence: str) -> str:
-    """Removes FASTA header lines (starting with '>') and whitespace."""
-    lines = sequence.strip().splitlines()
-    # Filter out lines that start with '>' and empty lines
-    seq_lines = [line.strip() for line in lines if line.strip() and not line.strip().startswith(">")]
-    return "".join(seq_lines).upper()
-
-def analyze_protein_sequence(sequence: str):
+def analyze_protein_sequence(sequence: str, hf_token: str = None):
     """
     Performs BioPython physicochemical analysis and extracts 
     ESM-2 embedding features to compute a druggability confidence score.
     """
-    clean_seq = clean_fasta_sequence(sequence)
-    
-    if not clean_seq:
-        raise ValueError("The provided sequence is empty or contains only FASTA headers.")
+    clean_seq = "".join(sequence.upper().split())
     
     # 1. BioPython Analysis
     analysed_seq = ProtParam.ProteinAnalysis(clean_seq)
@@ -41,7 +34,7 @@ def analyze_protein_sequence(sequence: str):
     aromaticity = analysed_seq.aromaticity()
     
     # 2. ESM-2 Embedding Feature Extraction
-    tokenizer, model = load_esm_model()
+    tokenizer, model = load_esm_model(hf_token=hf_token)
     inputs = tokenizer(clean_seq, return_tensors="pt", truncation=True, max_length=1024)
     
     with torch.no_grad():
