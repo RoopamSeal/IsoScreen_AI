@@ -1,27 +1,56 @@
 """
-Literature Survey & Knowledge Graph Agent
-------------------------------------------
-Backend logic for IsoScreenAI Page 3.
+Literature Survey Agent
+------------------------
+Backend logic for IsoScreenAI Page 3: a staged, semi-systematic literature
+review pipeline built around a researcher's free-text research question.
 
-Pipeline:
-  1. Query PubMed (via Biopython's Bio.Entrez) for a target protein / gene / disease.
-  2. Fetch abstracts for the top N hits.
-  3. Send abstracts to Groq (Llama 3.3) with a strict JSON schema prompt to extract
-     biomedical relationships (Protein-Disease, Drug-Target, Mechanism-of-Action, etc.)
-  4. Return a structured payload: articles, relationships (nodes/edges), and an
-     executive summary, ready for rendering in pages/3_Literature_Survey.py.
+Architecture
+------------
+Each of the six requirements maps to one explicit, independently callable
+stage. Stages are pure functions operating on dataclasses, so each can be
+tested, cached, or re-run in isolation instead of hiding everything behind
+one opaque "run everything" call:
 
-Mirrors the resilience patterns used in agents/protein_agent.py:
-  - defensive parsing of LLM output (strip code fences, salvage partial JSON)
-  - explicit handling of empty PubMed results
-  - Groq errors (rate limit / token limit) surfaced as clean exceptions, not crashes
+    1. search_pubmed()            -> PMIDs for the research question
+    2. fetch_articles()           -> Article records (title, year, DOI, abstract)
+    3. dedupe_articles()          -> duplicate-free Article list
+       screen_abstracts()         -> LLM relevance scoring per article
+       select_included()          -> deterministic, re-runnable local filter
+                                      (no LLM call) so a UI can move the
+                                      relevance-threshold slider freely
+                                      without re-billing the API
+    4. extract_paper_details()    -> methods / findings / datasets / limitations
+                                      per included paper
+    5. synthesize_review()        -> cross-paper gaps, conflicts, open questions
+    6. build_markdown_report()    -> single downloadable Markdown deliverable
+
+run_full_pipeline() is a thin convenience wrapper that chains all of the
+above for non-interactive / scripted use; the Streamlit page calls the
+staged functions directly so it can show intermediate results and avoid
+re-running expensive LLM stages when only a filter changes.
+
+Cost/latency notes:
+- Screening batches abstracts (default 5/call) into one JSON-array call
+  rather than one call per paper.
+- Extraction only runs on the *included* subset (post-screening), and is
+  capped by `max_papers_to_extract` to bound LLM spend on broad queries.
+- Synthesis operates on the compact extracted fields, not raw abstracts,
+  to keep the final synthesis prompt small.
+- All extraction is abstract-level (PubMed's API does not reliably expose
+  full text), so "methods"/"datasets"/"limitations" reflect what authors
+  reported in their abstract, not the full paper.
 """
 
+from __future__ import annotations
+
+import difflib
 import json
 import logging
 import re
 import time
-from typing import Optional
+from dataclasses import asdict, dataclass, field
+from datetime import date
+from typing import Callable, Optional
 
 from Bio import Entrez
 from groq import Groq
@@ -35,147 +64,89 @@ logger = logging.getLogger(__name__)
 # Setup
 # ---------------------------------------------------------------------------
 
-# NCBI requires an identifying email for Entrez API courtesy/rate-limit purposes.
-# Add ENTREZ_EMAIL (and optionally NCBI_API_KEY) to config.py.
-Entrez.email = getattr(config, "ENTREZ_EMAIL", "imroopamseal@")
+Entrez.email = getattr(config, "ENTREZ_EMAIL", "isoscreenai@example.com")
 _NCBI_API_KEY = getattr(config, "NCBI_API_KEY", None)
 if _NCBI_API_KEY:
     Entrez.api_key = _NCBI_API_KEY
 
-# Reuse the same Groq model/key convention as protein_agent.py.
 _GROQ_API_KEY = getattr(config, "GROQ_API_KEY", None)
-_GROQ_MODEL = getattr(config, "GROQ_MODEL", "qwen/qwen3.6-27b")
-
+_GROQ_MODEL = getattr(config, "GROQ_MODEL", "llama-3.3-70b-versatile")
 _client = Groq(api_key=_GROQ_API_KEY) if _GROQ_API_KEY else Groq()
+
+ProgressCallback = Optional[Callable[[str, float], None]]
+
+
+def _report_progress(cb: ProgressCallback, message: str, fraction: float) -> None:
+    if cb:
+        try:
+            cb(message, fraction)
+        except Exception:  # never let a UI callback break the pipeline
+            pass
 
 
 class LiteratureAgentError(Exception):
-    """Raised for any recoverable failure in the literature survey pipeline."""
+    """Raised for any recoverable failure in the literature review pipeline."""
 
 
 # ---------------------------------------------------------------------------
-# Step 1: PubMed search
+# Data model
 # ---------------------------------------------------------------------------
 
-def search_pubmed(query: str, max_results: int = 8, retries: int = 2) -> list[str]:
-    """Return a list of PMIDs for the given query."""
-    last_err = None
-    for attempt in range(retries + 1):
-        try:
-            handle = Entrez.esearch(
-                db="pubmed",
-                term=query,
-                retmax=max_results,
-                sort="relevance",
-            )
-            record = Entrez.read(handle)
-            handle.close()
-            return record.get("IdList", [])
-        except Exception as e:  # network hiccups, NCBI 429s, etc.
-            last_err = e
-            logger.warning("Entrez esearch failed (attempt %d): %s", attempt + 1, e)
-            time.sleep(1.5 * (attempt + 1))
-    raise LiteratureAgentError(f"PubMed search failed after retries: {last_err}")
+@dataclass
+class Article:
+    pmid: str
+    title: str
+    abstract: str
+    journal: str
+    year: Optional[str]
+    authors: str
+    doi: Optional[str]
+    url: str  # DOI link if available, else PubMed link
 
 
-# ---------------------------------------------------------------------------
-# Step 2: Fetch abstracts
-# ---------------------------------------------------------------------------
+@dataclass
+class ScreenedArticle(Article):
+    relevance_score: float = 0.0       # 0-10, LLM-assigned
+    screening_reason: str = ""
+    recommended_include: bool = False  # LLM's own include/exclude call
 
-def fetch_abstracts(pmids: list[str]) -> list[dict]:
-    """Fetch title + abstract + journal/year metadata for a list of PMIDs."""
-    if not pmids:
-        return []
 
-    try:
-        handle = Entrez.efetch(
-            db="pubmed", id=",".join(pmids), rettype="abstract", retmode="xml"
-        )
-        records = Entrez.read(handle)
-        handle.close()
-    except Exception as e:
-        raise LiteratureAgentError(f"PubMed fetch failed: {e}")
+@dataclass
+class ExtractedPaper:
+    pmid: str
+    title: str
+    year: Optional[str]
+    study_type: str
+    methods: str
+    key_findings: str
+    datasets: str
+    sample_size: str
+    limitations: str
 
-    articles = []
-    for article in records.get("PubmedArticle", []):
-        try:
-            medline = article["MedlineCitation"]
-            art = medline["Article"]
-            pmid = str(medline["PMID"])
-            title = str(art.get("ArticleTitle", "")).strip()
 
-            abstract_parts = art.get("Abstract", {}).get("AbstractText", [])
-            abstract = " ".join(str(p) for p in abstract_parts).strip()
+@dataclass
+class Conflict:
+    topic: str
+    description: str
+    pmids: list[str] = field(default_factory=list)
 
-            year = None
-            try:
-                year = art["Journal"]["JournalIssue"]["PubDate"].get("Year")
-            except Exception:
-                pass
 
-            journal = str(art.get("Journal", {}).get("Title", "")).strip()
+@dataclass
+class SynthesisResult:
+    overall_synthesis: str
+    gaps: list[str] = field(default_factory=list)
+    conflicts: list[Conflict] = field(default_factory=list)
+    open_questions: list[str] = field(default_factory=list)
 
-            if title or abstract:
-                articles.append(
-                    {
-                        "pmid": pmid,
-                        "title": title or "(no title available)",
-                        "abstract": abstract or "(no abstract available)",
-                        "journal": journal,
-                        "year": year,
-                        "url": f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/",
-                    }
-                )
-        except Exception as e:
-            logger.warning("Skipping malformed PubMed record: %s", e)
-            continue
 
-    return articles
+def to_records(items: list) -> list[dict]:
+    """Convert a list of dataclass instances to plain dicts (for pd.DataFrame)."""
+    return [asdict(i) for i in items]
 
 
 # ---------------------------------------------------------------------------
-# Step 3: LLM relationship extraction
+# Shared Groq JSON-call helper (used by screening / extraction / synthesis)
 # ---------------------------------------------------------------------------
-
-_SYSTEM_PROMPT = """You are a biomedical knowledge-extraction engine used in a \
-drug-discovery research tool. You read scientific abstracts and extract structured \
-relationships suitable for a knowledge graph.
-
-Return ONLY valid JSON (no markdown fences, no commentary) matching exactly this schema:
-
-{
-  "summary": "3-5 sentence executive synthesis across all provided abstracts",
-  "nodes": [
-    {"id": "string, short canonical entity name", "type": "Protein|Gene|Disease|Drug|Pathway|Mechanism|Other"}
-  ],
-  "edges": [
-    {"source": "node id", "target": "node id", "relation": "short verb phrase, e.g. 'inhibits', 'associated_with', 'upregulates'", "pmid": "source PMID for this claim"}
-  ]
-}
-
-Rules:
-- Only extract relationships that are explicitly or strongly implicitly supported by the text.
-- Reuse the exact same "id" string for the same entity across nodes/edges (canonicalize casing/synonyms).
-- Prefer specific relation verbs (e.g. "inhibits", "biomarker_for", "upregulates", "target_of") over generic ones.
-- Keep node ids short (protein/gene symbols, disease names, drug names).
-- If abstracts contain no extractable relationships, return empty nodes/edges arrays but still write the summary.
-- Do not invent PMIDs; only use the ones provided with each abstract.
-"""
-
-
-def _build_user_prompt(query: str, articles: list[dict]) -> str:
-    blocks = []
-    for a in articles:
-        blocks.append(
-            f"PMID: {a['pmid']}\nTitle: {a['title']}\nAbstract: {a['abstract']}"
-        )
-    joined = "\n\n---\n\n".join(blocks)
-    return (
-        f"Research query/target: {query}\n\n"
-        f"Below are {len(articles)} PubMed abstracts. Extract the knowledge graph "
-        f"as specified.\n\n{joined}"
-    )
-
 
 def _strip_code_fences(text: str) -> str:
     text = text.strip()
@@ -184,9 +155,10 @@ def _strip_code_fences(text: str) -> str:
     return text
 
 
-def _salvage_json(text: str) -> Optional[dict]:
+def _salvage_json(text: str, container: str = "{") -> Optional[dict | list]:
     """Best-effort recovery if the model wraps JSON in extra prose."""
-    match = re.search(r"\{.*\}", text, flags=re.DOTALL)
+    opener, closer = ("{", "}") if container == "{" else ("[", "]")
+    match = re.search(rf"\{re.escape(opener)}.*\{re.escape(closer)}", text, flags=re.DOTALL)
     if not match:
         return None
     try:
@@ -195,145 +167,588 @@ def _salvage_json(text: str) -> Optional[dict]:
         return None
 
 
-def extract_relationships_with_llm(query: str, articles: list[dict]) -> dict:
-    """Call Groq to extract a knowledge graph from the fetched abstracts.
-
-    Truncates abstract text defensively to stay under Groq token limits, matching
-    the guardrails already used for the protein report agent.
-    """
-    if not articles:
-        return {"summary": "No abstracts were available to analyze.", "nodes": [], "edges": []}
-
-    # Defensive truncation: cap total abstract characters sent to the LLM.
-    MAX_CHARS_PER_ABSTRACT = 1800
-    trimmed = [
-        {**a, "abstract": a["abstract"][:MAX_CHARS_PER_ABSTRACT]} for a in articles
-    ]
-
-    user_prompt = _build_user_prompt(query, trimmed)
-
+def _groq_json_call(
+    system_prompt: str,
+    user_prompt: str,
+    *,
+    expect_array: bool = False,
+    temperature: float = 0.2,
+    max_tokens: int = 2000,
+) -> dict | list:
+    """Call Groq expecting a raw-JSON response; parse defensively."""
     try:
         response = _client.chat.completions.create(
             model=_GROQ_MODEL,
             messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=0.2,
-            max_tokens=2000,
+            temperature=temperature,
+            max_tokens=max_tokens,
         )
     except Exception as e:
         msg = str(e).lower()
         if "rate_limit" in msg or "429" in msg:
             raise LiteratureAgentError(
-                "Groq rate limit / token limit hit while extracting relationships. "
-                "Try again shortly, or reduce the number of articles."
+                "Groq rate limit / token limit hit. Try again shortly, or reduce "
+                "the number of articles / batch size."
             )
-        raise LiteratureAgentError(f"Groq relationship extraction failed: {e}")
+        raise LiteratureAgentError(f"Groq call failed: {e}")
 
     raw = response.choices[0].message.content
     cleaned = _strip_code_fences(raw)
 
     try:
-        data = json.loads(cleaned)
+        return json.loads(cleaned)
     except json.JSONDecodeError:
-        data = _salvage_json(cleaned)
-        if data is None:
-            logger.warning("Could not parse LLM JSON output; raw: %s", raw[:500])
-            return {
-                "summary": "The literature was retrieved, but relationship extraction "
-                "returned malformed output. Try again or reduce the number of articles.",
-                "nodes": [],
-                "edges": [],
-            }
-
-    data.setdefault("summary", "")
-    data.setdefault("nodes", [])
-    data.setdefault("edges", [])
-    return data
+        salvaged = _salvage_json(cleaned, container="[" if expect_array else "{")
+        if salvaged is None:
+            logger.warning("Could not parse Groq JSON output; raw: %s", raw[:500])
+            raise LiteratureAgentError(
+                "The model returned malformed output for this step. Try again."
+            )
+        return salvaged
 
 
 # ---------------------------------------------------------------------------
-# Step 4: Orchestration
+# Stage 1-2: Search + Fetch
 # ---------------------------------------------------------------------------
 
-def run_literature_survey(query: str, max_results: int = 8) -> dict:
-    """Full pipeline entry point used by the Streamlit page.
+def search_pubmed(query: str, max_results: int = 15, retries: int = 2) -> list[str]:
+    """Return PMIDs matching the research question."""
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            handle = Entrez.esearch(db="pubmed", term=query, retmax=max_results, sort="relevance")
+            record = Entrez.read(handle)
+            handle.close()
+            return record.get("IdList", [])
+        except Exception as e:
+            last_err = e
+            logger.warning("Entrez esearch failed (attempt %d): %s", attempt + 1, e)
+            time.sleep(1.5 * (attempt + 1))
+    raise LiteratureAgentError(f"PubMed search failed after retries: {last_err}")
 
-    Returns:
-        {
-            "query": str,
-            "articles": [ {pmid, title, abstract, journal, year, url}, ... ],
-            "summary": str,
-            "nodes": [ {id, type}, ... ],
-            "edges": [ {source, target, relation, pmid}, ... ],
-        }
-    """
-    query = (query or "").strip()
-    if not query:
-        raise LiteratureAgentError("Please enter a target protein, gene, or disease query.")
 
-    pmids = search_pubmed(query, max_results=max_results)
+def _extract_doi(article_xml: dict, pubmed_data: dict) -> Optional[str]:
+    """Look for a DOI in ELocationID first, then PubmedData/ArticleIdList."""
+    try:
+        for eloc in article_xml.get("ELocationID", []):
+            if getattr(eloc, "attributes", {}).get("EIdType") == "doi":
+                return str(eloc)
+    except Exception:
+        pass
+    try:
+        for aid in pubmed_data.get("ArticleIdList", []):
+            if getattr(aid, "attributes", {}).get("IdType") == "doi":
+                return str(aid)
+    except Exception:
+        pass
+    return None
+
+
+def _format_authors(author_list: list) -> str:
+    names = []
+    for a in author_list[:3]:
+        last = a.get("LastName", "")
+        init = a.get("Initials", "")
+        if last:
+            names.append(f"{last} {init}".strip())
+    if not names:
+        return "Unknown authors"
+    suffix = ", et al." if len(author_list) > 3 else ""
+    return ", ".join(names) + suffix
+
+
+def fetch_articles(pmids: list[str]) -> list[Article]:
+    """Fetch title/abstract/year/journal/authors/DOI for a list of PMIDs."""
     if not pmids:
-        return {
-            "query": query,
-            "articles": [],
-            "summary": f"No PubMed results found for '{query}'. Try a broader or "
-            f"differently-worded query.",
-            "nodes": [],
-            "edges": [],
-        }
+        return []
+    try:
+        handle = Entrez.efetch(db="pubmed", id=",".join(pmids), rettype="abstract", retmode="xml")
+        records = Entrez.read(handle)
+        handle.close()
+    except Exception as e:
+        raise LiteratureAgentError(f"PubMed fetch failed: {e}")
 
-    articles = fetch_abstracts(pmids)
-    extraction = extract_relationships_with_llm(query, articles)
+    articles: list[Article] = []
+    for record in records.get("PubmedArticle", []):
+        try:
+            medline = record["MedlineCitation"]
+            art = medline["Article"]
+            pubmed_data = record.get("PubmedData", {})
+            pmid = str(medline["PMID"])
+            title = str(art.get("ArticleTitle", "")).strip() or "(no title available)"
 
-    return {
-        "query": query,
-        "articles": articles,
-        "summary": extraction.get("summary", ""),
-        "nodes": extraction.get("nodes", []),
-        "edges": extraction.get("edges", []),
-    }
+            abstract_parts = art.get("Abstract", {}).get("AbstractText", [])
+            abstract = " ".join(str(p) for p in abstract_parts).strip() or "(no abstract available)"
+
+            year = None
+            try:
+                year = art["Journal"]["JournalIssue"]["PubDate"].get("Year")
+            except Exception:
+                pass
+
+            journal = str(art.get("Journal", {}).get("Title", "")).strip()
+            authors = _format_authors(art.get("AuthorList", []))
+            doi = _extract_doi(art, pubmed_data)
+            url = f"https://doi.org/{doi}" if doi else f"https://pubmed.ncbi.nlm.nih.gov/{pmid}/"
+
+            articles.append(
+                Article(
+                    pmid=pmid,
+                    title=title,
+                    abstract=abstract,
+                    journal=journal,
+                    year=year,
+                    authors=authors,
+                    doi=doi,
+                    url=url,
+                )
+            )
+        except Exception as e:
+            logger.warning("Skipping malformed PubMed record: %s", e)
+            continue
+
+    return articles
 
 
 # ---------------------------------------------------------------------------
-# Helper: de-dupe / sanitize graph data before handing to the UI layer
+# Stage 3a: Deduplication
 # ---------------------------------------------------------------------------
 
-def build_graph_data(nodes: list[dict], edges: list[dict]) -> tuple[list[dict], list[dict]]:
-    """De-duplicate nodes and drop edges that reference missing nodes.
+def _normalize_title(title: str) -> str:
+    return re.sub(r"[^a-z0-9 ]", "", title.lower()).strip()
 
-    Keeps the UI layer (streamlit-agraph) simple and crash-free even if the
-    LLM output has minor inconsistencies.
+
+def dedupe_articles(articles: list[Article], title_similarity_threshold: float = 0.92) -> tuple[list[Article], int]:
+    """Remove duplicates by exact DOI match, then fuzzy title match.
+
+    Returns (deduped_articles, number_removed).
     """
-    seen = {}
-    clean_nodes = []
-    for n in nodes:
-        node_id = str(n.get("id", "")).strip()
-        if not node_id or node_id in seen:
-            continue
-        seen[node_id] = True
-        clean_nodes.append({"id": node_id, "type": n.get("type", "Other") or "Other"})
+    seen_dois: set[str] = set()
+    kept: list[Article] = []
+    kept_norm_titles: list[str] = []
+    removed = 0
 
-    valid_ids = set(seen.keys())
-    clean_edges = []
-    edge_seen = set()
-    for e in edges:
-        src = str(e.get("source", "")).strip()
-        tgt = str(e.get("target", "")).strip()
-        if not src or not tgt or src not in valid_ids or tgt not in valid_ids:
+    for a in articles:
+        if a.doi:
+            doi_key = a.doi.lower().strip()
+            if doi_key in seen_dois:
+                removed += 1
+                continue
+        norm_title = _normalize_title(a.title)
+        is_dupe = False
+        if a.doi and a.doi.lower().strip() in seen_dois:
+            is_dupe = True
+        else:
+            for kept_title in kept_norm_titles:
+                if difflib.SequenceMatcher(None, norm_title, kept_title).ratio() >= title_similarity_threshold:
+                    is_dupe = True
+                    break
+        if is_dupe:
+            removed += 1
             continue
-        key = (src, tgt, e.get("relation", ""))
-        if key in edge_seen:
-            continue
-        edge_seen.add(key)
-        clean_edges.append(
-            {
-                "source": src,
-                "target": tgt,
-                "relation": e.get("relation", "related_to") or "related_to",
-                "pmid": e.get("pmid", ""),
-            }
+
+        kept.append(a)
+        kept_norm_titles.append(norm_title)
+        if a.doi:
+            seen_dois.add(a.doi.lower().strip())
+
+    return kept, removed
+
+
+# ---------------------------------------------------------------------------
+# Stage 3b: Abstract screening (LLM relevance scoring)
+# ---------------------------------------------------------------------------
+
+_SCREENING_SYSTEM_PROMPT = """You are a systematic-review screening assistant. \
+Given a research question and a batch of PubMed abstracts, score each abstract's \
+relevance to the research question.
+
+Return ONLY a valid JSON array (no markdown fences, no commentary), one object per \
+abstract, in this exact schema:
+
+[
+  {
+    "pmid": "string, must exactly match the PMID given",
+    "relevance_score": 0-10 (integer, 10 = directly and centrally addresses the question),
+    "include": true/false (true if relevance_score >= 6),
+    "reason": "one sentence explaining the score"
+  }
+]
+
+Score strictly: a paper that merely mentions a related keyword without addressing the \
+question should score low (0-3). A paper that directly investigates the question's \
+subject should score high (7-10).
+"""
+
+
+def screen_abstracts(
+    research_question: str,
+    articles: list[Article],
+    batch_size: int = 5,
+    progress_callback: ProgressCallback = None,
+) -> list[ScreenedArticle]:
+    """Score every article's relevance to the research question via batched LLM calls."""
+    if not articles:
+        return []
+
+    screened: list[ScreenedArticle] = []
+    batches = [articles[i : i + batch_size] for i in range(0, len(articles), batch_size)]
+
+    for b_idx, batch in enumerate(batches):
+        _report_progress(
+            progress_callback,
+            f"Screening abstracts (batch {b_idx + 1}/{len(batches)})...",
+            b_idx / max(len(batches), 1),
+        )
+        blocks = [f'PMID: {a.pmid}\nTitle: {a.title}\nAbstract: {a.abstract[:1500]}' for a in batch]
+        user_prompt = (
+            f"Research question: {research_question}\n\n"
+            f"Score the following {len(batch)} abstracts:\n\n" + "\n\n---\n\n".join(blocks)
         )
 
-    return clean_nodes, clean_edges
+        try:
+            results = _groq_json_call(
+                _SCREENING_SYSTEM_PROMPT, user_prompt, expect_array=True, max_tokens=1200
+            )
+        except LiteratureAgentError as e:
+            logger.warning("Screening batch %d failed: %s", b_idx, e)
+            results = []
+
+        scores_by_pmid = {}
+        if isinstance(results, list):
+            for r in results:
+                pmid = str(r.get("pmid", "")).strip()
+                if pmid:
+                    scores_by_pmid[pmid] = r
+
+        for a in batch:
+            r = scores_by_pmid.get(a.pmid)
+            if r:
+                score = float(r.get("relevance_score", 0) or 0)
+                screened.append(
+                    ScreenedArticle(
+                        **asdict(a),
+                        relevance_score=score,
+                        screening_reason=r.get("reason", ""),
+                        recommended_include=bool(r.get("include", score >= 6)),
+                    )
+                )
+            else:
+                # Screening failed for this article; flag it for manual review
+                # rather than silently dropping it.
+                screened.append(
+                    ScreenedArticle(
+                        **asdict(a),
+                        relevance_score=0.0,
+                        screening_reason="Automatic screening failed for this article; review manually.",
+                        recommended_include=False,
+                    )
+                )
+
+    _report_progress(progress_callback, "Screening complete.", 1.0)
+    return screened
+
+
+def select_included(
+    screened: list[ScreenedArticle],
+    relevance_threshold: float = 6.0,
+    max_papers: int = 12,
+) -> list[ScreenedArticle]:
+    """Deterministic, local (no-LLM-call) filter — safe to re-run on every UI interaction.
+
+    Selects articles at/above the threshold, capped to the top `max_papers` by score
+    so a broad query can't blow up downstream extraction cost.
+    """
+    eligible = [s for s in screened if s.relevance_score >= relevance_threshold]
+    eligible.sort(key=lambda s: s.relevance_score, reverse=True)
+    return eligible[:max_papers]
+
+
+# ---------------------------------------------------------------------------
+# Stage 4: Per-paper structured extraction
+# ---------------------------------------------------------------------------
+
+_EXTRACTION_SYSTEM_PROMPT = """You are a biomedical literature analyst. Extract \
+structured information from a single paper's abstract for a systematic literature \
+review. Base your answer only on what is stated or clearly implied in the abstract \
+provided — do not invent details the abstract does not support.
+
+Return ONLY valid JSON (no markdown fences, no commentary) in this exact schema:
+
+{
+  "study_type": "short label, e.g. 'RCT', 'cohort study', 'in vitro', 'computational/in silico', 'review', 'case report'",
+  "methods": "1-2 sentence summary of the methodology/approach used",
+  "key_findings": "1-2 sentence summary of the main results",
+  "datasets": "datasets, cohorts, cell lines, or data sources used; write 'Not specified' if the abstract does not say",
+  "sample_size": "sample size / n, if stated; write 'Not specified' if absent",
+  "limitations": "limitations stated or clearly implied by the abstract; write 'Not stated in abstract' if none are given"
+}
+"""
+
+
+def extract_paper_details(
+    articles: list[ScreenedArticle] | list[Article],
+    progress_callback: ProgressCallback = None,
+) -> list[ExtractedPaper]:
+    """Run one extraction call per paper (only call this on the included subset)."""
+    extracted: list[ExtractedPaper] = []
+    total = len(articles) or 1
+
+    for i, a in enumerate(articles):
+        _report_progress(
+            progress_callback, f"Extracting details ({i + 1}/{len(articles)}): {a.title[:60]}...", i / total
+        )
+        user_prompt = f"Title: {a.title}\n\nAbstract: {a.abstract[:2500]}"
+        try:
+            data = _groq_json_call(_EXTRACTION_SYSTEM_PROMPT, user_prompt, max_tokens=600)
+        except LiteratureAgentError as e:
+            logger.warning("Extraction failed for PMID %s: %s", a.pmid, e)
+            data = {}
+
+        extracted.append(
+            ExtractedPaper(
+                pmid=a.pmid,
+                title=a.title,
+                year=a.year,
+                study_type=data.get("study_type", "Not determined"),
+                methods=data.get("methods", "Extraction failed for this paper."),
+                key_findings=data.get("key_findings", "Extraction failed for this paper."),
+                datasets=data.get("datasets", "Not specified"),
+                sample_size=data.get("sample_size", "Not specified"),
+                limitations=data.get("limitations", "Not stated in abstract"),
+            )
+        )
+
+    _report_progress(progress_callback, "Extraction complete.", 1.0)
+    return extracted
+
+
+# ---------------------------------------------------------------------------
+# Stage 5: Cross-paper synthesis (gaps, conflicts, open questions)
+# ---------------------------------------------------------------------------
+
+_SYNTHESIS_SYSTEM_PROMPT = """You are a senior research scientist writing the \
+discussion section of a literature review. You will be given structured summaries \
+(methods, findings, limitations) extracted from multiple papers addressing the same \
+research question.
+
+Return ONLY valid JSON (no markdown fences, no commentary) in this exact schema:
+
+{
+  "overall_synthesis": "2-4 sentence narrative synthesizing the current state of evidence",
+  "gaps": ["short bullet describing a missing type of data / unstudied population / methodological gap", "..."],
+  "conflicts": [
+    {
+      "topic": "short label for the point of disagreement",
+      "description": "1-2 sentences describing the conflicting findings or theories",
+      "pmids": ["pmid1", "pmid2"]
+    }
+  ],
+  "open_questions": ["short bullet phrased as an open research question", "..."]
+}
+
+Only report conflicts that are genuinely supported by contradicting findings/claims \
+across the provided papers — do not fabricate disagreement where papers are simply \
+studying different things. If there are no clear conflicts, return an empty list.
+"""
+
+
+def synthesize_review(research_question: str, extracted: list[ExtractedPaper]) -> SynthesisResult:
+    if not extracted:
+        return SynthesisResult(
+            overall_synthesis="No papers were extracted, so no synthesis could be generated.",
+            gaps=[],
+            conflicts=[],
+            open_questions=[],
+        )
+
+    blocks = []
+    for p in extracted:
+        blocks.append(
+            f"PMID: {p.pmid} | {p.title} ({p.year})\n"
+            f"Study type: {p.study_type}\n"
+            f"Methods: {p.methods}\n"
+            f"Findings: {p.key_findings}\n"
+            f"Limitations: {p.limitations}"
+        )
+    user_prompt = (
+        f"Research question: {research_question}\n\n"
+        f"Extracted summaries from {len(extracted)} included papers:\n\n"
+        + "\n\n---\n\n".join(blocks)
+    )
+
+    try:
+        data = _groq_json_call(_SYNTHESIS_SYSTEM_PROMPT, user_prompt, max_tokens=1500)
+    except LiteratureAgentError as e:
+        logger.warning("Synthesis failed: %s", e)
+        return SynthesisResult(
+            overall_synthesis=f"Synthesis could not be generated: {e}",
+            gaps=[],
+            conflicts=[],
+            open_questions=[],
+        )
+
+    conflicts = [
+        Conflict(
+            topic=c.get("topic", "Untitled"),
+            description=c.get("description", ""),
+            pmids=c.get("pmids", []),
+        )
+        for c in data.get("conflicts", [])
+    ]
+
+    return SynthesisResult(
+        overall_synthesis=data.get("overall_synthesis", ""),
+        gaps=data.get("gaps", []),
+        conflicts=conflicts,
+        open_questions=data.get("open_questions", []),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Stage 6: Downloadable report
+# ---------------------------------------------------------------------------
+
+def build_markdown_report(
+    research_question: str,
+    all_articles: list[Article],
+    duplicates_removed: int,
+    screened: list[ScreenedArticle],
+    included: list[ScreenedArticle],
+    extracted: list[ExtractedPaper],
+    synthesis: SynthesisResult,
+) -> str:
+    lines: list[str] = []
+    lines.append(f"# Literature Review: {research_question}")
+    lines.append(f"*Generated by IsoScreenAI on {date.today().isoformat()}*\n")
+
+    lines.append("## 1. Search & Screening Summary")
+    lines.append(f"- Articles fetched from PubMed: **{len(all_articles)}**")
+    lines.append(f"- Duplicates removed: **{duplicates_removed}**")
+    lines.append(f"- Articles screened for relevance: **{len(screened)}**")
+    lines.append(f"- Articles selected as high-relevance (included): **{len(included)}**\n")
+
+    lines.append("## 2. Included Studies")
+    lines.append("| Title | Year | Relevance | Link |")
+    lines.append("|---|---|---|---|")
+    for s in included:
+        title_escaped = s.title.replace("|", "-")
+        lines.append(f"| {title_escaped} | {s.year or 'n.d.'} | {s.relevance_score:.0f}/10 | [Link]({s.url}) |")
+    lines.append("")
+
+    lines.append("## 3. Extracted Study Details")
+    for p in extracted:
+        lines.append(f"### {p.title} ({p.year or 'n.d.'})")
+        lines.append(f"- **PMID:** {p.pmid}")
+        lines.append(f"- **Study type:** {p.study_type}")
+        lines.append(f"- **Methods:** {p.methods}")
+        lines.append(f"- **Key findings:** {p.key_findings}")
+        lines.append(f"- **Datasets:** {p.datasets}")
+        lines.append(f"- **Sample size:** {p.sample_size}")
+        lines.append(f"- **Limitations:** {p.limitations}\n")
+
+    lines.append("## 4. Synthesis")
+    lines.append(synthesis.overall_synthesis + "\n")
+
+    lines.append("### Gaps in the Current Literature")
+    if synthesis.gaps:
+        for g in synthesis.gaps:
+            lines.append(f"- {g}")
+    else:
+        lines.append("- No clear gaps identified from the included papers.")
+    lines.append("")
+
+    lines.append("### Conflicting Findings / Theories")
+    if synthesis.conflicts:
+        for c in synthesis.conflicts:
+            pmid_str = ", ".join(c.pmids) if c.pmids else "n/a"
+            lines.append(f"- **{c.topic}:** {c.description} (PMIDs: {pmid_str})")
+    else:
+        lines.append("- No clear conflicts identified across the included papers.")
+    lines.append("")
+
+    lines.append("### Open Research Questions")
+    if synthesis.open_questions:
+        for q in synthesis.open_questions:
+            lines.append(f"- {q}")
+    else:
+        lines.append("- None identified.")
+    lines.append("")
+
+    lines.append("## 5. Excluded Studies (Screened Out)")
+    excluded = [s for s in screened if s not in included]
+    if excluded:
+        lines.append("| Title | Year | Relevance | Reason |")
+        lines.append("|---|---|---|---|")
+        for s in excluded:
+            title_escaped = s.title.replace("|", "-")
+            lines.append(f"| {title_escaped} | {s.year or 'n.d.'} | {s.relevance_score:.0f}/10 | {s.screening_reason} |")
+    else:
+        lines.append("_All fetched, deduplicated articles were included._")
+    lines.append("")
+
+    lines.append("## References")
+    for i, p in enumerate(extracted, start=1):
+        match = next((s for s in included if s.pmid == p.pmid), None)
+        url = match.url if match else f"https://pubmed.ncbi.nlm.nih.gov/{p.pmid}/"
+        lines.append(f"{i}. PMID {p.pmid}. {p.title} ({p.year or 'n.d.'}). {url}")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Convenience orchestrator (for scripted / non-UI use)
+# ---------------------------------------------------------------------------
+
+def run_full_pipeline(
+    research_question: str,
+    max_results: int = 15,
+    relevance_threshold: float = 6.0,
+    max_papers_to_extract: int = 12,
+    progress_callback: ProgressCallback = None,
+) -> dict:
+    """Chains all six stages. The Streamlit page calls the stages individually
+    instead of this, so it can render intermediate results and avoid re-running
+    expensive stages on every widget interaction — but this is useful for
+    scripts, notebooks, or tests.
+    """
+    research_question = (research_question or "").strip()
+    if not research_question:
+        raise LiteratureAgentError("Please enter a research question.")
+
+    _report_progress(progress_callback, "Searching PubMed...", 0.05)
+    pmids = search_pubmed(research_question, max_results=max_results)
+    if not pmids:
+        raise LiteratureAgentError(f"No PubMed results found for '{research_question}'.")
+
+    _report_progress(progress_callback, "Fetching articles...", 0.15)
+    fetched = fetch_articles(pmids)
+
+    deduped, removed = dedupe_articles(fetched)
+
+    screened = screen_abstracts(research_question, deduped, progress_callback=progress_callback)
+    included = select_included(screened, relevance_threshold, max_papers_to_extract)
+
+    extracted = extract_paper_details(included, progress_callback=progress_callback)
+
+    _report_progress(progress_callback, "Synthesizing findings...", 0.9)
+    synthesis = synthesize_review(research_question, extracted)
+
+    report_md = build_markdown_report(
+        research_question, fetched, removed, screened, included, extracted, synthesis
+    )
+    _report_progress(progress_callback, "Done.", 1.0)
+
+    return {
+        "research_question": research_question,
+        "fetched": fetched,
+        "duplicates_removed": removed,
+        "screened": screened,
+        "included": included,
+        "extracted": extracted,
+        "synthesis": synthesis,
+        "report_md": report_md,
+    }
