@@ -28,7 +28,7 @@ Entrez.email = getattr(config, "ENTREZ_EMAIL", "isoscreenai@example.com")
 if getattr(config, "NCBI_API_KEY", None):
     Entrez.api_key = config.NCBI_API_KEY
 
-_GROQ_MODEL = getattr(config, "GROQ_MODEL", "llama-3.3-70b-versatile")
+_GROQ_MODEL = getattr(config, "GROQ_MODEL", "qwen/qwen3.6-27b")
 _GROQ_API_KEY = getattr(config, "GROQ_API_KEY", None)
 _client = Groq(api_key=_GROQ_API_KEY) if _GROQ_API_KEY else Groq()
 
