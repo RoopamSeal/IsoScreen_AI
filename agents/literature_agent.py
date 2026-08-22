@@ -37,14 +37,14 @@ logger = logging.getLogger(__name__)
 
 # NCBI requires an identifying email for Entrez API courtesy/rate-limit purposes.
 # Add ENTREZ_EMAIL (and optionally NCBI_API_KEY) to config.py.
-Entrez.email = getattr(config, "ENTREZ_EMAIL", "isoscreenai@example.com")
+Entrez.email = getattr(config, "ENTREZ_EMAIL", "imroopamseal@")
 _NCBI_API_KEY = getattr(config, "NCBI_API_KEY", None)
 if _NCBI_API_KEY:
     Entrez.api_key = _NCBI_API_KEY
 
 # Reuse the same Groq model/key convention as protein_agent.py.
 _GROQ_API_KEY = getattr(config, "GROQ_API_KEY", None)
-_GROQ_MODEL = getattr(config, "GROQ_MODEL", "llama-3.3-70b-versatile")
+_GROQ_MODEL = getattr(config, "GROQ_MODEL", "qwen/qwen3.6-27b")
 
 _client = Groq(api_key=_GROQ_API_KEY) if _GROQ_API_KEY else Groq()
 
