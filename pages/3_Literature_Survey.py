@@ -1,12 +1,17 @@
 """
-Page 3 - Literature Survey & Knowledge Graph Agent
-UI layer only. All heavy lifting lives in agents/literature_agent.py.
+Page 3 - Literature Survey Agent
+UI layer only. All pipeline logic lives in agents/literature_agent.py.
+
+Design: each pipeline stage is invoked and displayed separately (rather than
+one opaque "run everything" button), matching the six-step review process.
+Expensive LLM stages (screening, extraction, synthesis) are cached in
+st.session_state and only re-run on an explicit user action; the relevance
+threshold slider re-filters already-screened data locally (free, instant).
 """
 
-import sys
 import os
+import sys
 
-# Ensure project root is importable when Streamlit runs pages/ directly.
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
@@ -14,153 +19,255 @@ import streamlit as st
 
 from agents.literature_agent import (
     LiteratureAgentError,
-    build_graph_data,
-    run_literature_survey,
+    build_markdown_report,
+    dedupe_articles,
+    extract_paper_details,
+    fetch_articles,
+    screen_abstracts,
+    search_pubmed,
+    select_included,
+    synthesize_review,
+    to_records,
 )
-
-try:
-    from streamlit_agraph import Config, Edge, Node, agraph
-
-    AGRAPH_AVAILABLE = True
-except ImportError:
-    AGRAPH_AVAILABLE = False
 
 st.set_page_config(page_title="Literature Survey | IsoScreenAI", page_icon="📚", layout="wide")
 
-st.title("📚 Literature Survey & Knowledge Graph Agent")
+st.title("📚 Literature Survey Agent")
 st.caption(
-    "Search PubMed for a target protein, gene, or disease and extract a structured "
-    "knowledge graph of biomedical relationships (Protein-Disease, Drug-Target, "
-    "Mechanism of Action) to accelerate early-stage target validation."
+    "Enter a research question to search PubMed, screen and deduplicate results, "
+    "extract structured study details, surface gaps and conflicts in the current "
+    "literature, and download a complete review report."
 )
 
+for key in ["fetched", "removed", "screened", "extracted", "synthesis", "report_md", "research_question", "included"]:
+    st.session_state.setdefault(key, None)
+
 # ---------------------------------------------------------------------------
-# Input
+# Step 1 & 2: Query -> Search & Fetch
 # ---------------------------------------------------------------------------
 
-with st.form("literature_survey_form"):
+with st.form("search_form"):
     col1, col2 = st.columns([3, 1])
     with col1:
-        query = st.text_input(
-            "Target protein, gene, or disease",
-            placeholder="e.g. KRAS G12C, EGFR non-small cell lung cancer, PCSK9",
+        research_question = st.text_input(
+            "Research question",
+            placeholder="e.g. Does PCSK9 inhibition reduce cardiovascular events in statin-intolerant patients?",
         )
     with col2:
-        max_results = st.slider("Max articles", min_value=3, max_value=20, value=8)
-    submitted = st.form_submit_button("Run Literature Survey", type="primary")
+        max_results = st.slider("Max articles to fetch", min_value=5, max_value=30, value=15)
+    search_submitted = st.form_submit_button("1-2. Search & Fetch Articles", type="primary")
 
-# ---------------------------------------------------------------------------
-# Run pipeline
-# ---------------------------------------------------------------------------
-
-if submitted:
-    if not query.strip():
-        st.warning("Enter a query before running the survey.")
+if search_submitted:
+    if not research_question.strip():
+        st.warning("Enter a research question first.")
         st.stop()
-
-    with st.spinner(f"Searching PubMed and extracting relationships for '{query}'..."):
+    with st.spinner("Searching PubMed and fetching articles..."):
         try:
-            result = run_literature_survey(query, max_results=max_results)
+            pmids = search_pubmed(research_question, max_results=max_results)
+            if not pmids:
+                st.warning(f"No PubMed results found for '{research_question}'. Try rephrasing.")
+                st.stop()
+            fetched = fetch_articles(pmids)
+            deduped, removed = dedupe_articles(fetched)
         except LiteratureAgentError as e:
             st.error(str(e))
             st.stop()
-        except Exception as e:
-            st.error(f"Unexpected error during literature survey: {e}")
-            st.stop()
 
-    st.session_state["lit_survey_result"] = result
+    # New search invalidates all downstream cached stages.
+    st.session_state["research_question"] = research_question
+    st.session_state["fetched"] = deduped
+    st.session_state["removed"] = removed
+    st.session_state["screened"] = None
+    st.session_state["extracted"] = None
+    st.session_state["synthesis"] = None
+    st.session_state["report_md"] = None
+    st.session_state["included"] = None
 
 # ---------------------------------------------------------------------------
-# Display (persisted in session_state so widget interactions don't re-run the pipeline)
+# Step 2/3 display: fetched + deduplicated articles
 # ---------------------------------------------------------------------------
 
-result = st.session_state.get("lit_survey_result")
+if st.session_state["fetched"]:
+    fetched = st.session_state["fetched"]
+    removed = st.session_state["removed"]
 
-if result:
     st.divider()
-    st.subheader("Executive Summary")
-    st.write(result["summary"] or "_No summary generated._")
+    st.subheader("2-3. Retrieved Articles (deduplicated)")
+    st.caption(f"{len(fetched)} unique articles retained — {removed} duplicate(s) removed.")
 
-    articles = result["articles"]
-    nodes_raw, edges_raw = result["nodes"], result["edges"]
-    nodes, edges = build_graph_data(nodes_raw, edges_raw)
-
-    tab_graph, tab_articles, tab_relationships = st.tabs(
-        ["🕸️ Knowledge Graph", "📄 Articles", "🔗 Relationships Table"]
+    df_fetched = pd.DataFrame(to_records(fetched))[["title", "year", "journal", "url"]]
+    df_fetched.columns = ["Title", "Year", "Journal", "Link"]
+    st.dataframe(
+        df_fetched,
+        use_container_width=True,
+        column_config={"Link": st.column_config.LinkColumn("Link", display_text="Open ↗")},
     )
 
-    # -- Knowledge graph tab -------------------------------------------------
-    with tab_graph:
-        if not nodes:
-            st.info("No relationships were extracted to visualize. Try a more specific query.")
-        elif AGRAPH_AVAILABLE:
-            type_colors = {
-                "Protein": "#4C9AFF",
-                "Gene": "#57D9A3",
-                "Disease": "#FF7452",
-                "Drug": "#FFAB00",
-                "Pathway": "#998DD9",
-                "Mechanism": "#79E2F2",
-                "Other": "#B3BAC5",
-            }
-            agraph_nodes = [
-                Node(
-                    id=n["id"],
-                    label=n["id"],
-                    size=22,
-                    color=type_colors.get(n["type"], type_colors["Other"]),
-                )
-                for n in nodes
-            ]
-            agraph_edges = [
-                Edge(source=e["source"], target=e["target"], label=e["relation"])
-                for e in edges
-            ]
-            config = Config(
-                width=1000,
-                height=550,
-                directed=True,
-                physics=True,
-                hierarchical=False,
-                collapsible=False,
-            )
-            agraph(nodes=agraph_nodes, edges=agraph_edges, config=config)
+    if st.button("3. Screen Abstracts for Relevance"):
+        progress_bar = st.progress(0.0, text="Starting screening...")
 
-            legend_cols = st.columns(len(type_colors))
-            for col, (t, c) in zip(legend_cols, type_colors.items()):
-                col.markdown(
-                    f"<span style='color:{c}'>●</span> {t}", unsafe_allow_html=True
-                )
+        def _on_progress(msg, frac):
+            progress_bar.progress(min(max(frac, 0.0), 1.0), text=msg)
+
+        try:
+            screened = screen_abstracts(
+                st.session_state["research_question"], fetched, progress_callback=_on_progress
+            )
+        except LiteratureAgentError as e:
+            st.error(str(e))
+            st.stop()
+        progress_bar.empty()
+        st.session_state["screened"] = screened
+        st.session_state["extracted"] = None
+        st.session_state["synthesis"] = None
+        st.session_state["report_md"] = None
+        st.session_state["included"] = None
+
+# ---------------------------------------------------------------------------
+# Step 3 display: screening results + relevance threshold (free, local filter)
+# ---------------------------------------------------------------------------
+
+if st.session_state["screened"]:
+    screened = st.session_state["screened"]
+
+    st.divider()
+    st.subheader("3. Abstract Screening")
+
+    fig_col, table_col = st.columns([1, 2])
+    with fig_col:
+        score_df = pd.DataFrame({"relevance_score": [s.relevance_score for s in screened]})
+        st.caption("Relevance score distribution")
+        st.bar_chart(score_df["relevance_score"].value_counts().sort_index())
+
+    with table_col:
+        threshold = st.slider("Relevance threshold (include if score ≥)", 0, 10, 6)
+        max_papers = st.slider("Max papers to carry forward to extraction", 3, 20, 12)
+        included = select_included(screened, relevance_threshold=threshold, max_papers=max_papers)
+        st.caption(f"{len(included)} of {len(screened)} articles selected as high-relevance.")
+
+    df_screened = pd.DataFrame(to_records(screened))[
+        ["title", "year", "relevance_score", "recommended_include", "screening_reason", "url"]
+    ]
+    df_screened.columns = ["Title", "Year", "Relevance", "LLM Include?", "Reason", "Link"]
+    df_screened = df_screened.sort_values("Relevance", ascending=False)
+    st.dataframe(
+        df_screened,
+        use_container_width=True,
+        column_config={"Link": st.column_config.LinkColumn("Link", display_text="Open ↗")},
+    )
+
+    st.session_state["included"] = included
+
+    if included and st.button("4-5. Extract Details & Synthesize Review", type="primary"):
+        progress_bar = st.progress(0.0, text="Starting extraction...")
+
+        def _on_progress(msg, frac):
+            progress_bar.progress(min(max(frac, 0.0), 1.0), text=msg)
+
+        try:
+            extracted = extract_paper_details(included, progress_callback=_on_progress)
+            progress_bar.progress(0.9, text="Synthesizing gaps and conflicts...")
+            synthesis = synthesize_review(st.session_state["research_question"], extracted)
+        except LiteratureAgentError as e:
+            st.error(str(e))
+            st.stop()
+        progress_bar.empty()
+
+        st.session_state["extracted"] = extracted
+        st.session_state["synthesis"] = synthesis
+        st.session_state["report_md"] = build_markdown_report(
+            st.session_state["research_question"],
+            st.session_state["fetched"],
+            st.session_state["removed"],
+            screened,
+            included,
+            extracted,
+            synthesis,
+        )
+    elif not included:
+        st.info("No articles currently meet the relevance threshold — lower it to proceed.")
+
+# ---------------------------------------------------------------------------
+# Step 4 display: extracted study details
+# ---------------------------------------------------------------------------
+
+if st.session_state["extracted"]:
+    extracted = st.session_state["extracted"]
+
+    st.divider()
+    st.subheader("4. Extracted Study Details")
+
+    df_overview = pd.DataFrame(to_records(extracted))[["title", "year", "study_type", "sample_size"]]
+    df_overview.columns = ["Title", "Year", "Study Type", "Sample Size"]
+    st.dataframe(df_overview, use_container_width=True)
+
+    type_counts = df_overview["Study Type"].value_counts()
+    st.caption("Study type breakdown")
+    st.bar_chart(type_counts)
+
+    for p in extracted:
+        with st.expander(f"{p.title} ({p.year or 'n.d.'})"):
+            c1, c2 = st.columns(2)
+            with c1:
+                st.markdown(f"**Study type:** {p.study_type}")
+                st.markdown(f"**Methods:** {p.methods}")
+                st.markdown(f"**Datasets:** {p.datasets}")
+            with c2:
+                st.markdown(f"**Key findings:** {p.key_findings}")
+                st.markdown(f"**Sample size:** {p.sample_size}")
+                st.markdown(f"**Limitations:** {p.limitations}")
+
+# ---------------------------------------------------------------------------
+# Step 5 display: synthesis (gaps, conflicts, open questions)
+# ---------------------------------------------------------------------------
+
+if st.session_state["synthesis"]:
+    synthesis = st.session_state["synthesis"]
+
+    st.divider()
+    st.subheader("5. Synthesis: Gaps, Conflicts & Open Questions")
+    st.write(synthesis.overall_synthesis)
+
+    g_col, c_col, q_col = st.columns(3)
+    with g_col:
+        st.markdown("**🕳️ Gaps in the Literature**")
+        if synthesis.gaps:
+            for g in synthesis.gaps:
+                st.markdown(f"- {g}")
         else:
-            st.warning(
-                "Install `streamlit-agraph` for an interactive graph "
-                "(`pip install streamlit-agraph`). Showing relationships as a table instead."
-            )
-            st.dataframe(pd.DataFrame(edges), use_container_width=True)
-
-    # -- Articles tab ----------------------------------------------------------
-    with tab_articles:
-        if not articles:
-            st.info("No PubMed articles found for this query.")
-        for a in articles:
-            with st.expander(f"{a['title']}  ({a.get('year', 'n.d.')})"):
-                st.markdown(f"**Journal:** {a.get('journal', 'N/A')}")
-                st.markdown(f"**PMID:** [{a['pmid']}]({a['url']})")
-                st.write(a["abstract"])
-
-    # -- Relationships table tab ------------------------------------------------
-    with tab_relationships:
-        if edges:
-            df = pd.DataFrame(edges)[["source", "relation", "target", "pmid"]]
-            df.columns = ["Source", "Relation", "Target", "PMID"]
-            st.dataframe(df, use_container_width=True)
-            st.download_button(
-                "Download relationships as CSV",
-                data=df.to_csv(index=False),
-                file_name=f"literature_relationships_{result['query'].replace(' ', '_')}.csv",
-                mime="text/csv",
-            )
+            st.caption("None identified.")
+    with c_col:
+        st.markdown("**⚖️ Conflicting Findings**")
+        if synthesis.conflicts:
+            for c in synthesis.conflicts:
+                st.markdown(f"- **{c.topic}:** {c.description}")
+                st.caption(f"PMIDs: {', '.join(c.pmids) if c.pmids else 'n/a'}")
         else:
-            st.info("No relationships were extracted.")
-else:
-    st.info("Enter a query above and run the survey to see results.")
+            st.caption("None identified.")
+    with q_col:
+        st.markdown("**❓ Open Questions**")
+        if synthesis.open_questions:
+            for q in synthesis.open_questions:
+                st.markdown(f"- {q}")
+        else:
+            st.caption("None identified.")
+
+# ---------------------------------------------------------------------------
+# Step 6: Downloadable report
+# ---------------------------------------------------------------------------
+
+if st.session_state["report_md"]:
+    st.divider()
+    st.subheader("6. Download Full Report")
+    st.download_button(
+        "📥 Download Literature Review (Markdown)",
+        data=st.session_state["report_md"],
+        file_name=f"literature_review_{st.session_state['research_question'][:40].replace(' ', '_')}.md",
+        mime="text/markdown",
+        type="primary",
+    )
+    with st.expander("Preview report"):
+        st.markdown(st.session_state["report_md"])
+
+if not st.session_state["fetched"]:
+    st.info("Enter a research question above to begin.")
