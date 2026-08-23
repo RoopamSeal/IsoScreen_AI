@@ -29,7 +29,7 @@ with st.form("survey_form"):
             placeholder="e.g. Does PCSK9 inhibition reduce cardiovascular events in statin-intolerant patients?",
         )
     with col2:
-        max_results = st.slider("Max articles", 5, 30, 15)
+        max_results = st.slider("Max articles", 5, 15, 10)
     submitted = st.form_submit_button("Run Literature Survey", type="primary")
 
 if submitted:
